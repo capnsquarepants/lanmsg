@@ -15,7 +15,7 @@
   --corner-radius: 0px;
   --sidebar-width: 214px;
   --timestamp-width: 6ch;
-  --nickname-width: 18ch;
+  --nickname-width: 10ch;
   color-scheme: dark;
   font-family: var(--font-family);
   font-size: var(--font-size);
@@ -150,7 +150,7 @@ legend { color: var(--muted); font-size: .8rem; padding: 0 6px; }
 #message-history-results h4 { color: var(--muted); font-size: .85rem; }
 #message-history-results pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 @media (max-width: 800px) {
-  :root { --sidebar-width: 175px; --nickname-width: 12ch; }
+  :root { --sidebar-width: 175px; --nickname-width: 8ch; }
   header, #messages { padding-left: 12px; padding-right: 12px; }
   .message { gap: 8px; }
   .compose-area, .status-bar { padding-left: 12px; padding-right: 12px; }
