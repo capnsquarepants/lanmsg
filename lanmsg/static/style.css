@@ -188,3 +188,9 @@ legend { color: var(--muted); font-size: .8rem; padding: 0 6px; }
 #mention-suggestions { max-height: 180px; overflow-y: auto; border: 1px solid var(--border); background: var(--sidebar); margin-bottom: 8px; }
 #mention-suggestions button { display: block; width: 100%; text-align: left; background: transparent; color: var(--text); border: 0; }
 #mention-suggestions button.selected, #mention-suggestions button:hover { background: var(--panel); color: var(--accent); }
+
+.new-messages-divider { color: var(--accent); border-top: 1px solid var(--accent); margin: 12px 0; text-align: center; }
+.jump-target { outline: 1px solid var(--accent); }
+#mentions-dialog { width: min(760px, 95vw); height: min(700px, 90vh); overflow: auto; }
+#mentions-results article { border-bottom: 1px solid var(--border); padding: 12px 0; }
+#mentions-results p { white-space: pre-wrap; overflow-wrap: anywhere; }

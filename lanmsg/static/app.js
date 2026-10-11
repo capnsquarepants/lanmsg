@@ -2,7 +2,11 @@
 const $ = id => document.getElementById(id);
 let member, channel = 1, channelList = [], registering = false, socket, heartbeat, reconnectTimer;
 let generation = 0, messages = new Map(), pendingSend, loading = false;
-const unread = new Set(), mentionUnread = new Map(), seenEvents = new Set();
+const seenEvents = new Set();
+const readStates = new Map();
+let readFetch = null, readDirty = false, readRefreshTimer, viewportTimer, readSaving = false;
+let readBoundary = null, hasNewer = false, selecting = false, mentionsCursor = null, inboxRequest = 0;
+const unreadDivider = document.createElement('div'); unreadDivider.className = 'new-messages-divider'; unreadDivider.textContent = 'New messages';
 let directory = [], directoryFetched = 0, directoryFetching = false, suggestionIndex = 0, suggestionState = null;
 const messageRows = new Map(), dayRows = new Map();
 let serverMediaPreviews = false;
@@ -11,7 +15,7 @@ let savingAdmin = false, activeAdminSection = 'settings';
 const LIMIT_LABELS = {connections:'Total connections', connections_per_ip:'Connections per IP', connections_per_session:'Connections per session', http_concurrency:'Concurrent API requests', message_rate:'Messages per second / account', message_burst:'Message burst / account'};
 const desktopAlerts = new Map();
 function updateAlertTitle() {
-  const count = [...mentionUnread.values()].reduce((sum,ids) => sum + ids.size,0);
+  const count = [...readStates.values()].reduce((sum,state) => sum + state.mentions,0);
   document.title = (count ? '(' + count + ' mentions) ' : '') + ($('server-name').textContent || 'LANmsg') + ' · LANmsg';
 }
 function notificationStatus() {
@@ -28,11 +32,7 @@ function receiveAlert(message) {
   if(!member || seenEvents.has(message.id)) return;
   seenEvents.add(message.id); if(seenEvents.size > 2000) seenEvents.delete(seenEvents.values().next().value);
   const focused = document.visibilityState === 'visible' && document.hasFocus();
-  if(message.user_id !== member.id && Mentions.isMention(message,member.id) && !(message.channel_id === channel && focused)) {
-    const ids = mentionUnread.get(message.channel_id) || new Set(); ids.add(message.id);
-    if(ids.size > 1000) ids.delete(ids.values().next().value);
-    mentionUnread.set(message.channel_id,ids); updateAlertTitle(); loadChannels().catch(showError);
-  }
+  scheduleReadRefresh();
   if(!Mentions.shouldAlert(message,member,channel,focused) || !member.desktop_notifications || !globalThis.isSecureContext || !('Notification' in globalThis) || Notification.permission !== 'granted') return;
   // Visible channels already have their own badges; avoid OS alerts while using the app.
   if(focused) return;
@@ -45,18 +45,82 @@ function receiveAlert(message) {
   } catch { /* Embedded browsers may expose the API without supporting its constructor. */ }
 }
 function removeMentionAlert(message) {
-  if(!Mentions.isMention(message,member?.id)) {
-    const ids = mentionUnread.get(message.channel_id); ids?.delete(message.id);
-    if(ids && !ids.size) mentionUnread.delete(message.channel_id);
-    if(ids) { updateAlertTitle(); loadChannels().catch(showError); }
-    if(desktopAlerts.get(message.channel_id)?.messageId === message.id) { desktopAlerts.get(message.channel_id).close(); desktopAlerts.delete(message.channel_id); }
+  scheduleReadRefresh();
+  if(!Mentions.isMention(message,member?.id) && desktopAlerts.get(message.channel_id)?.messageId === message.id) {
+    desktopAlerts.get(message.channel_id).close(); desktopAlerts.delete(message.channel_id);
   }
 }
 function clearCurrentAlerts() {
   if(!member || document.visibilityState !== 'visible' || !document.hasFocus()) return;
-  unread.delete(channel); mentionUnread.delete(channel); updateAlertTitle(); loadChannels().catch(showError);
+  scheduleViewportRead(); scheduleReadRefresh();
   desktopAlerts.get(channel)?.close(); desktopAlerts.delete(channel);
 }
+function scheduleReadRefresh() {
+  if(readRefreshTimer) return;
+  readRefreshTimer = setTimeout(() => { readRefreshTimer = null; refreshReadState().catch(showError); },250);
+}
+async function refreshReadState() {
+  if(readFetch) { readDirty = true; return readFetch; }
+  readFetch = (async () => {
+    do {
+      readDirty = false;
+      const data = await api('/read-state'); readStates.clear();
+      for(const state of data.channels) readStates.set(state.id,state);
+      updateAlertTitle(); drawChannels();
+    } while(readDirty);
+  })();
+  try { await readFetch; } finally { readFetch = null; }
+}
+function scheduleViewportRead() {
+  clearTimeout(viewportTimer); viewportTimer = setTimeout(markViewportRead,700);
+}
+async function markViewportRead() {
+  if(!member || selecting || readSaving || document.visibilityState !== 'visible' || !document.hasFocus() || document.querySelector('dialog[open]')) return;
+  const box = $('messages').getBoundingClientRect(); let position = 0;
+  for(const row of $('message-list').querySelectorAll('article.message')) {
+    const rect = row.getBoundingClientRect();
+    if(rect.top < box.bottom && rect.bottom <= box.bottom && rect.bottom > box.top) position = Math.max(position,Number(row.id.slice(8)));
+  }
+  if(!position || position <= (readStates.get(channel)?.read_id || 0)) return;
+  const currentChannel = channel; let saved = false; readSaving = true;
+  try {
+    await api('/channels/' + currentChannel + '/read',{method:'PUT',body:JSON.stringify({message_id:position})}); saved = true; await refreshReadState();
+  } catch(error) { showError(error); }
+  finally { readSaving = false; if(saved || currentChannel !== channel) scheduleViewportRead(); }
+}
+$('messages').addEventListener('scroll',scheduleViewportRead);
+$('mark-channel-read').onclick = async () => {
+  try { await refreshReadState(); const position = readStates.get(channel)?.latest_id || 0;
+    await api('/channels/' + channel + '/read',{method:'PUT',body:JSON.stringify({message_id:position})});
+    readBoundary = null; render(); await refreshReadState();
+  } catch(error) { showError(error); }
+};
+$('mark-all-read').onclick = async () => {
+  try { await api('/read-all',{method:'POST'}); readBoundary = null; render(); await refreshReadState(); if($('mentions-dialog').open) await loadMentions(); }
+  catch(error) { showError(error); }
+};
+async function loadMentions(before = null) {
+  const request = ++inboxRequest; $('mentions-error').textContent = ''; $('mentions-more').disabled = true;
+  if(before === null) $('mentions-results').replaceChildren();
+  try {
+    const data = await api('/mentions?unread_only=' + $('mentions-unread-only').checked + (before === null ? '' : '&before=' + before));
+    if(request !== inboxRequest || !$('mentions-dialog').open) return;
+    for(const message of data.messages) {
+      const item = document.createElement('article'), button = document.createElement('button'), text = document.createElement('p');
+      button.className = 'quiet'; button.textContent = '#' + message.channel_name + ' / ' + (message.display_name || message.username) + ' / ' + new Date(message.created*1000).toLocaleString() + (message.unread ? ' / unread' : '');
+      text.textContent = message.content; button.onclick = async () => { $('mentions-dialog').close(); try { await select(message.channel_id,message.id); } catch(error) { showError(error); } };
+      item.append(button,text); $('mentions-results').append(item);
+    }
+    if(!data.messages.length && before === null) $('mentions-results').textContent = 'No mentions here.';
+    mentionsCursor = data.next_before; $('mentions-more').hidden = mentionsCursor === null;
+  } catch(error) { if(request === inboxRequest) $('mentions-error').textContent = error.message; }
+  finally { if(request === inboxRequest) $('mentions-more').disabled = false; }
+}
+$('mentions-open').onclick = () => { $('mentions-dialog').showModal(); loadMentions(); };
+$('mentions-close').onclick = () => $('mentions-dialog').close();
+$('mentions-dialog').onclose = () => { inboxRequest++; scheduleViewportRead(); };
+$('mentions-unread-only').onchange = () => loadMentions();
+$('mentions-more').onclick = () => loadMentions(mentionsCursor);
 window.addEventListener('focus',clearCurrentAlerts);
 document.addEventListener('visibilitychange',clearCurrentAlerts);
 function hideSuggestions() { suggestionState = null; $('mention-suggestions').hidden = true; $('mention-suggestions').replaceChildren(); }
@@ -316,7 +380,7 @@ $('appearance-form').onsubmit = async event => {
   finally { savingTheme = false; $('appearance-save').disabled = false; }
 };
 async function api(path, options = {}) {
-  const response = await fetch('/api' + path, {...options, headers: {'Content-Type':'application/json', 'X-LANmsg':'1'}});
+  const response = await fetch('/api' + path, {cache:'no-store', ...options, headers: {'Content-Type':'application/json', 'X-LANmsg':'1'}});
   const data = await response.json();
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Check the supplied fields.');
   return data;
@@ -337,12 +401,15 @@ $('login').onsubmit = async event => {
   finally { $('submit-auth').disabled = false; }
 };
 async function loadChannels() {
-  channelList = await api('/channels');
+  channelList = await api('/channels'); await refreshReadState(); drawChannels();
+}
+function drawChannels() {
   $('channels').replaceChildren(...channelList.filter(c => c.kind === 'text').map(c => {
-    const button = document.createElement('button'); button.textContent = '#' + c.name + (mentionUnread.get(c.id)?.size ? ' @' + mentionUnread.get(c.id).size : '');
-    button.className = (c.id === channel ? 'active ' : '') + (unread.has(c.id) ? 'unread' : '');
-    if(mentionUnread.get(c.id)?.size) button.classList.add('has-mentions');
-    if (c.id === channel) button.setAttribute('aria-current','page');
+    const state = readStates.get(c.id), button = document.createElement('button');
+    button.textContent = '#' + c.name + (state?.unread ? ' (' + state.unread + ')' : '') + (state?.mentions ? ' @' + state.mentions : '');
+    button.className = (c.id === channel ? 'active ' : '') + (state?.unread ? 'unread' : '');
+    if(state?.mentions) button.classList.add('has-mentions');
+    if(c.id === channel) button.setAttribute('aria-current','page');
     button.onclick = () => select(c.id).catch(showError); return button;
   }));
 }
@@ -421,7 +488,7 @@ function render() {
   const focused = document.activeElement;
   const editFocus = focused?.id === 'message-edit-' + editingMessage ? {start:focused.selectionStart,end:focused.selectionEnd} : null;
   const scroller = $('messages'), nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 100;
-  const rows = []; let previousDay;
+  const rows = []; let previousDay, divided = false;
   for (const m of [...messages.values()].sort((a,b) => a.id-b.id)) {
     const timestamp = new Date(m.created*1000), day = timestamp.toDateString();
     if(day !== previousDay) {
@@ -429,6 +496,7 @@ function render() {
       divider.textContent = timestamp.toLocaleDateString(undefined,{weekday:'short',year:'numeric',month:'short',day:'numeric'});
       rows.push(divider); previousDay = day;
     }
+    if(!divided && readBoundary !== null && m.id > readBoundary && !m.deleted && m.user_id !== member?.id) { rows.push(unreadDivider); divided = true; }
     const profile = {...m, ...profileUpdates.get(m.user_id)}, displayName = profile.display_name || profile.username;
     const signature = JSON.stringify([m.version, m.content, m.deleted, m.edited, profile.display_name, profile.username, profile.nickname_color, mediaPreviewsEnabled, member?.owner, m.mentions]);
     const cached = messageRows.get(m.id);
@@ -479,19 +547,39 @@ function render() {
   for(const [day,row] of dayRows) if(!desired.has(row)) dayRows.delete(day);
   $('empty').hidden = messages.size > 0;
   if(editFocus) { const input = $('message-edit-' + editingMessage); if(input && !input.disabled) { input.focus({preventScroll:true}); input.setSelectionRange(editFocus.start,editFocus.end); } }
-  if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+  if (nearBottom && !hasNewer) scroller.scrollTop = scroller.scrollHeight;
+  scheduleViewportRead();
 }
-async function select(id) {
-  channel = id; const current = ++generation; messages.clear(); if(!savingMessage) { editingMessage = null; editDraft = ''; } unread.delete(id); mentionUnread.delete(id); desktopAlerts.get(id)?.close(); desktopAlerts.delete(id); updateAlertTitle(); hideSuggestions();
-  ChannelState.save(member.id, id);
+async function select(id, around = null) {
+  channel = id; const current = ++generation; selecting = true; messages.clear(); hasNewer = false; readBoundary = null;
+  if(!savingMessage) { editingMessage = null; editDraft = ''; }
+  desktopAlerts.get(id)?.close(); desktopAlerts.delete(id); hideSuggestions();
+  ChannelState.save(member.id,id);
   const name = channelList.find(c => c.id === id)?.name || 'general';
   $('channel-title').textContent = '#' + name; $('status-channel').textContent = '#' + name; $('content').placeholder = 'Message #' + name;
-  $('older').hidden = true; await loadChannels();
-  const history = await api(`/channels/${id}/messages`);
-  if (current !== generation) return;
-  history.forEach(mergeMessage); render(); $('older').hidden = history.length < 50;
-  $('messages').scrollTop = $('messages').scrollHeight;
+  $('older').hidden = true; $('newer').hidden = true; render();
+  try {
+    const view = await api('/channels/' + id + '/view' + (around === null ? '' : '?around=' + around));
+    if(current !== generation) return;
+    // Live deliveries during this request are merged by version, preserving edits/deletions.
+    view.messages.forEach(mergeMessage); readBoundary = view.read_id; hasNewer = view.has_newer;
+    if(hasNewer && view.messages.length) { const end = view.messages.at(-1).id; for(const key of messages.keys()) if(key > end) messages.delete(key); }
+    render(); $('older').hidden = !view.has_older; $('newer').hidden = !hasNewer;
+    const target = around === null ? $('message-list').querySelector('.new-messages-divider') : $('message-' + around);
+    if(target) { target.scrollIntoView({block:'start'}); if(around !== null) target.classList.add('jump-target'); }
+    else $('messages').scrollTop = $('messages').scrollHeight;
+    await refreshReadState(); drawChannels();
+  } finally { if(current === generation) { selecting = false; scheduleViewportRead(); } }
 }
+$('newer').onclick = async () => {
+  if(loading || !messages.size) return;
+  loading = true; const current = generation;
+  try {
+    const rows = await api('/channels/' + channel + '/messages?after=' + Math.max(...messages.keys()));
+    if(current !== generation) return;
+    rows.forEach(mergeMessage); hasNewer = rows.length === 50; render(); $('newer').hidden = !hasNewer;
+  } catch(error) { showError(error); } finally { loading = false; }
+};
 $('older').onclick = async () => {
   if (loading || !messages.size) return;
   loading = true; const current = generation, scroller = $('messages'), height = scroller.scrollHeight, top = scroller.scrollTop;
@@ -524,16 +612,18 @@ function connect() {
     }
     if(data.type === 'server_settings') receiveServerSettings(data.settings);
     if(data.type === 'appearance') receiveTheme(data.appearance);
+    if(data.type === 'reads' && data.user_id === member?.id) { scheduleReadRefresh(); if($('mentions-dialog').open) loadMentions(); }
     if(data.type === 'channels') loadChannels().catch(showError);
     if(data.type === 'message_update') {
       removeMentionAlert(data.message);
-      if(data.message.channel_id === channel) { mergeMessage(data.message); render(); }
+      if(data.message.channel_id === channel && (!hasNewer || messages.has(data.message.id))) { mergeMessage(data.message); if(!selecting) render(); }
     }
     if(data.type === 'message') {
       const m = data.message;
       receiveAlert(m);
-      if(m.channel_id === channel) { mergeMessage(m); render(); }
-      else { unread.add(m.channel_id); loadChannels().catch(showError); }
+      if(m.channel_id === channel && selecting) { mergeMessage(m); }
+      else if(m.channel_id === channel && !hasNewer) { mergeMessage(m); render(); }
+      else { scheduleReadRefresh(); if(m.channel_id === channel) { hasNewer = true; $('newer').hidden = false; } }
     }
   };
   socket.onclose = () => { clearInterval(heartbeat); $('connection').textContent = 'Reconnecting…'; $('connection').dataset.state = 'offline'; reconnectTimer = setTimeout(connect,2000); };
@@ -542,7 +632,7 @@ async function start() {
   const profile = await api('/me/profile'); member = {...member, ...profile}; updateMediaPreference(profile.media_previews);
   $('auth').hidden = true; $('chat').hidden = false; $('admin').hidden = !member.owner;
   refreshIdentity();
-  directory = await api('/users'); seenEvents.clear(); mentionUnread.clear(); unread.clear();
+  directory = await api('/users'); seenEvents.clear();
   await loadChannels();
   channel = ChannelState.restore(member.id, channelList);
   await select(channel); connect();
@@ -555,7 +645,8 @@ $('composer').onsubmit = async event => {
   const attempt = pendingSend;
   try {
     const m = await api(`/channels/${attempt.channel}/messages`, {method:'POST', body:JSON.stringify(attempt)});
-    if(channel === m.channel_id) { mergeMessage(m); render(); }
+    if(channel === m.channel_id && !hasNewer) { mergeMessage(m); render(); }
+    scheduleReadRefresh();
     if($('content').value.trim() === attempt.content) $('content').value = ''; hideSuggestions();
     pendingSend = null;
   } catch(error) { showError(new Error('Message not confirmed. Press Send to retry. ' + error.message)); }

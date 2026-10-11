@@ -11,17 +11,19 @@
 </section>
 <main id="chat" hidden>
   <aside><div class="brand"><span class="brand-mark">#</span><span id="server-name">LANmsg</span></div><div id="server-description" class="server-label">Your private network</div><p class="section-label">CHANNELS</p><nav id="channels" aria-label="Text channels"></nav>
+    <button id="mentions-open" class="quiet">Mentions inbox</button><button id="mark-all-read" class="quiet">Mark all read</button>
     <div id="admin" hidden><button id="admin-open" class="quiet">Admin console</button></div>
     <div class="voice"><strong>Voice</strong><p>Planned for a future release</p></div>
     <footer><button id="identity" class="quiet" aria-label="Manage your profile"><span id="identity-name"></span><small id="identity-handle"></small></button><button id="logout" class="quiet">Sign out</button></footer>
   </aside>
-  <section class="conversation"><header><div><h1 id="channel-title">#general</h1><p class="channel-caption">Text channel · Make yourself at home</p></div><span class="header-label">LANmsg / text</span></header>
-    <div id="messages" role="log" aria-label="Messages"><button id="older" class="quiet" hidden>↑ Load earlier messages</button><div id="message-list"></div><p id="empty" class="system-line" hidden>No messages yet. Start the conversation.</p></div>
+  <section class="conversation"><header><div><h1 id="channel-title">#general</h1><p class="channel-caption">Text channel · Make yourself at home</p></div><button id="mark-channel-read" class="quiet">Mark channel read</button></header>
+    <div id="messages" role="log" aria-label="Messages"><button id="older" class="quiet" hidden>↑ Load earlier messages</button><div id="message-list"></div><button id="newer" class="quiet" hidden>Load newer messages</button><p id="empty" class="system-line" hidden>No messages yet. Start the conversation.</p></div>
     <div class="compose-area"><div id="mention-suggestions" role="group" aria-label="Mention suggestions" hidden></div><form id="composer"><span id="composer-nick" class="composer-nick" aria-hidden="true"></span><label class="sr-only" for="content">Message</label><textarea id="content" placeholder="Message #general" maxlength="4000" rows="1" required></textarea><button id="send">Send ↵</button></form>
     <p id="chat-error" role="alert"></p></div>
     <div class="status-bar"><span id="connection" role="status">Connecting…</span><span id="status-channel">#general</span><span class="composer-hint">Enter to send · Shift+Enter for a new line</span></div>
   </section>
 </main>
+<dialog id="mentions-dialog" aria-labelledby="mentions-title"><div class="dialog-heading"><h2 id="mentions-title">Mentions inbox</h2><button id="mentions-close" type="button" class="quiet" aria-label="Close mentions inbox">Close</button></div><label class="checkbox-label"><input id="mentions-unread-only" type="checkbox" checked>Unread only</label><div id="mentions-results"></div><button id="mentions-more" class="quiet" hidden>Load earlier mentions</button><p id="mentions-error" role="alert"></p></dialog>
 <dialog id="admin-dialog" aria-labelledby="admin-title">
   <div class="dialog-heading"><div><h2 id="admin-title">Admin console</h2><p>Manage this server · Owner access</p></div><button id="admin-close" type="button" class="quiet" aria-label="Close admin console">✕</button></div>
   <div id="admin-stats" class="admin-stats"></div>

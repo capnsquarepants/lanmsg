@@ -29,6 +29,19 @@ from .settings import AppSettings, LIMIT_FIELDS
 STATIC = Path(__file__).parent / "static"
 
 
+def mentioned_users(conn, content):
+    text = re.sub(r'https?://[^\s<>"`]+', ' ', content, flags=re.I)
+    handles = sorted(set(match.lower() for match in re.findall(r"(?<![\w@/])@([a-zA-Z0-9_-]{2,32})(?![\w-])", text)))
+    if not handles:
+        return []
+    return [dict(user) for user in conn.execute("SELECT id,username FROM users WHERE lower(username) IN (" + ",".join("?" for _ in handles) + ") ORDER BY id", handles)]
+
+
+def sync_mentions(conn, message_id, content):
+    conn.execute("DELETE FROM message_mentions WHERE message_id=?", (message_id,))
+    conn.executemany("INSERT INTO message_mentions(message_id,user_id) VALUES(?,?)", [(message_id, user["id"]) for user in mentioned_users(conn, content)])
+
+
 class Credentials(BaseModel):
     username: str = Field(min_length=2, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
     password: str = Field(min_length=10, max_length=128)
@@ -49,6 +62,11 @@ class MessageEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
     content: str = Field(min_length=1, max_length=4000)
     version: int = Field(ge=1)
+
+
+class ReadPosition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message_id: int = Field(ge=0)
 
 
 class Channel(BaseModel):
@@ -147,6 +165,29 @@ def create_app(database=None, limits=None):
             version INTEGER NOT NULL, content TEXT NOT NULL, changed REAL NOT NULL,
             actor_id INTEGER REFERENCES users(id), action TEXT NOT NULL,
             PRIMARY KEY(message_id, version))""")
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS channel_reads(
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            channel_id INTEGER REFERENCES channels(id) ON DELETE CASCADE,
+            message_id INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(user_id,channel_id));
+        CREATE TABLE IF NOT EXISTS message_mentions(
+            message_id INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            PRIMARY KEY(message_id,user_id));
+        CREATE INDEX IF NOT EXISTS mentions_by_user ON message_mentions(user_id,message_id);
+        CREATE TABLE IF NOT EXISTS message_sequence(id INTEGER PRIMARY KEY CHECK(id=1),value INTEGER NOT NULL);
+        INSERT OR IGNORE INTO message_sequence VALUES(1,(SELECT coalesce(max(id),0) FROM messages));
+        """)
+        if "read_start_id" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN read_start_id INTEGER NOT NULL DEFAULT 0")
+            # Existing chat history is a baseline, rather than thousands of new alerts.
+            conn.execute("UPDATE users SET read_start_id=(SELECT coalesce(max(id),0) FROM messages)")
+        conn.execute("UPDATE message_sequence SET value=max(value,coalesce((SELECT max(read_start_id) FROM users),0),coalesce((SELECT max(message_id) FROM channel_reads),0)) WHERE id=1")
+        if not conn.execute("SELECT 1 FROM settings WHERE key='mention_index'").fetchone():
+            for row in conn.execute("SELECT id,content FROM messages WHERE deleted IS NULL"):
+                sync_mentions(conn, row["id"], row["content"])
+            conn.execute("INSERT INTO settings(key,value) VALUES('mention_index','1')")
         stored = conn.execute("SELECT value FROM settings WHERE key='app'").fetchone()
     saved_settings = AppSettings.model_validate_json(stored["value"]) if stored else AppSettings(**{key: getattr(limits, key) for key in LIMIT_FIELDS})
     limits = replace(limits, **{key: getattr(saved_settings, key) for key in LIMIT_FIELDS})
@@ -205,8 +246,9 @@ def create_app(database=None, limits=None):
         member = user(request.cookies.get("session"))
         if request.method != "GET" and request.url.path != "/api/previews":
             message = request.url.path.endswith("/messages")
-            rate, burst = (limits.message_rate, limits.message_burst) if message else (limits.write_rate, limits.write_burst)
-            if not limiter.allow(("message" if message else "write", member["id"]), rate, burst):
+            read = request.url.path.endswith("/read") or request.url.path == "/api/read-all"
+            rate, burst = (2, 10) if read else ((limits.message_rate, limits.message_burst) if message else (limits.write_rate, limits.write_burst))
+            if not limiter.allow(("read" if read else "message" if message else "write", member["id"]), rate, burst):
                 raise HTTPException(429, "Too many changes; retry shortly", headers={"Retry-After": str(max(1, int(1 / rate) + 1))})
             if shutil.disk_usage(path.parent).free < limits.minimum_free_bytes:
                 raise HTTPException(507, "Server is low on disk space")
@@ -302,7 +344,7 @@ def create_app(database=None, limits=None):
                 salt = secrets.token_hex(16)
                 password = hashlib.scrypt(body.password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1).hex()
                 try:
-                    conn.execute("INSERT INTO users(username,display_name,salt,password,owner) VALUES(?,?,?,?,?)", (body.username, body.username, salt, password, owner))
+                    conn.execute("INSERT INTO users(username,display_name,salt,password,owner,read_start_id) VALUES(?,?,?,?,?,(SELECT value FROM message_sequence WHERE id=1))", (body.username, body.username, salt, password, owner))
                 except sqlite3.IntegrityError:
                     raise HTTPException(409, "That username is taken")
                 conn.execute("DELETE FROM invites WHERE token=?", (body.invite,))
@@ -436,11 +478,7 @@ def create_app(database=None, limits=None):
         result["content"] = "" if row["deleted"] is not None else row["content"]
         result["mentions"] = []
         if result["content"]:
-            # Ignore URL tokens and email addresses; handles have ASCII account syntax.
-            text = re.sub(r'https?://[^\s<>"`]+', ' ', result["content"], flags=re.I)
-            handles = sorted(set(match.lower() for match in re.findall(r"(?<![\w@/])@([a-zA-Z0-9_-]{2,32})(?![\w-])", text)))
-            if handles:
-                result["mentions"] = [dict(user) for user in conn.execute("SELECT id,username FROM users WHERE lower(username) IN (" + ",".join("?" for _ in handles) + ") ORDER BY id", handles)]
+            result["mentions"] = [dict(user) for user in conn.execute("SELECT u.id,u.username FROM message_mentions mm JOIN users u ON u.id=mm.user_id WHERE mm.message_id=? ORDER BY u.id", (row["id"],))]
         return result
 
     def message_row(conn, message_id):
@@ -449,10 +487,97 @@ def create_app(database=None, limits=None):
             raise HTTPException(404, "Message not found")
         return row
 
+    def read_position(conn, user_id, channel_id):
+        return conn.execute("SELECT coalesce((SELECT message_id FROM channel_reads WHERE user_id=u.id AND channel_id=?),u.read_start_id) FROM users u WHERE id=?", (channel_id, user_id)).fetchone()[0]
+
+    def channel_read_state(conn, user_id):
+        return [dict(row) for row in conn.execute("""
+            WITH positions AS (
+                SELECT c.id,coalesce(r.message_id,u.read_start_id) AS read_id
+                FROM channels c CROSS JOIN users u LEFT JOIN channel_reads r ON r.channel_id=c.id AND r.user_id=u.id
+                WHERE u.id=? AND c.kind='text')
+            SELECT p.id,p.read_id,coalesce((SELECT max(id) FROM messages WHERE channel_id=p.id),0) AS latest_id,
+                count(CASE WHEN m.id>p.read_id AND m.deleted IS NULL AND m.user_id!=? THEN 1 END) AS unread,
+                count(CASE WHEN m.id>p.read_id AND m.deleted IS NULL AND m.user_id!=? AND mm.user_id IS NOT NULL THEN 1 END) AS mentions,
+                min(CASE WHEN m.id>p.read_id AND m.deleted IS NULL AND m.user_id!=? THEN m.id END) AS first_unread
+            FROM positions p LEFT JOIN messages m ON m.channel_id=p.id AND m.id>p.read_id
+            LEFT JOIN message_mentions mm ON mm.message_id=m.id AND mm.user_id=? GROUP BY p.id
+            """, (user_id, user_id, user_id, user_id, user_id))]
+
+    @app.get("/api/read-state")
+    def read_state(request: Request):
+        member = auth(request)
+        with db() as conn:
+            return {"channels": channel_read_state(conn, member["id"])}
+
+    @app.put("/api/channels/{channel_id}/read")
+    def mark_read(channel_id: int, body: ReadPosition, request: Request):
+        member = auth(request)
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if not conn.execute("SELECT 1 FROM channels WHERE id=? AND kind='text'", (channel_id,)).fetchone():
+                raise HTTPException(404, "Text channel not found")
+            if body.message_id and not conn.execute("SELECT 1 FROM messages WHERE id=? AND channel_id=?", (body.message_id, channel_id)).fetchone():
+                raise HTTPException(422, "Read position must be a message in this channel")
+            position = max(read_position(conn, member["id"], channel_id), body.message_id)
+            conn.execute("INSERT INTO channel_reads VALUES(?,?,?) ON CONFLICT(user_id,channel_id) DO UPDATE SET message_id=max(message_id,excluded.message_id)", (member["id"], channel_id, position))
+        hub.publish({"type": "reads", "user_id": member["id"]})
+        return {"channel_id": channel_id, "read_id": position}
+
+    @app.post("/api/read-all")
+    def mark_all_read(request: Request):
+        member = auth(request)
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            latest = conn.execute("SELECT value FROM message_sequence WHERE id=1").fetchone()[0]
+            conn.execute("UPDATE users SET read_start_id=max(read_start_id,?) WHERE id=?", (latest, member["id"]))
+            conn.execute("UPDATE channel_reads SET message_id=max(message_id,?) WHERE user_id=?", (latest, member["id"]))
+        hub.publish({"type": "reads", "user_id": member["id"]})
+        return {"ok": True}
+
+    @app.get("/api/mentions")
+    def mentions_inbox(request: Request, before: int = 9223372036854775807, unread_only: bool = True):
+        member = auth(request)
+        with db() as conn:
+            rows = list(conn.execute("""SELECT m.*,u.username,u.display_name,u.nickname_color,c.name AS channel_name
+                FROM message_mentions mm JOIN messages m ON m.id=mm.message_id
+                JOIN users u ON u.id=m.user_id JOIN channels c ON c.id=m.channel_id
+                JOIN users me ON me.id=mm.user_id LEFT JOIN channel_reads r ON r.user_id=me.id AND r.channel_id=m.channel_id
+                WHERE mm.user_id=? AND m.id<? AND m.deleted IS NULL AND m.user_id!=?
+                AND (?=0 OR m.id>coalesce(r.message_id,me.read_start_id)) ORDER BY m.id DESC LIMIT 51""",
+                (member["id"], before, member["id"], int(unread_only))))
+            items = [{**public_message(row, conn), "channel_name": row["channel_name"], "unread": row["id"] > read_position(conn, member["id"], row["channel_id"])} for row in rows[:50]]
+        return {"messages": items, "next_before": items[-1]["id"] if len(rows) > 50 else None}
+
+    @app.get("/api/channels/{channel_id}/view")
+    def channel_view(channel_id: int, request: Request, around: int | None = None):
+        member = auth(request)
+        with db() as conn:
+            if not conn.execute("SELECT 1 FROM channels WHERE id=? AND kind='text'", (channel_id,)).fetchone():
+                raise HTTPException(404, "Text channel not found")
+            position = read_position(conn, member["id"], channel_id)
+            if around is not None and not conn.execute("SELECT 1 FROM messages WHERE id=? AND channel_id=?", (around, channel_id)).fetchone():
+                raise HTTPException(404, "Message no longer exists in this channel")
+            if around is None:
+                around = conn.execute("SELECT min(id) FROM messages WHERE channel_id=? AND id>? AND deleted IS NULL AND user_id!=?", (channel_id, position, member["id"])).fetchone()[0]
+            select = "SELECT m.*,u.username,u.display_name,u.nickname_color FROM messages m JOIN users u ON u.id=m.user_id WHERE m.channel_id=?"
+            if around is None:
+                rows = list(conn.execute(select + " ORDER BY m.id DESC LIMIT 50", (channel_id,)))[::-1]
+            else:
+                rows = list(conn.execute(select + " AND m.id<? ORDER BY m.id DESC LIMIT 20", (channel_id, around)))[::-1]
+                rows += list(conn.execute(select + " AND m.id>=? ORDER BY m.id LIMIT 30", (channel_id, around)))
+            oldest = rows[0]["id"] if rows else 0
+            newest = rows[-1]["id"] if rows else 0
+            return {"messages": [public_message(row, conn) for row in rows], "read_id": position,
+                    "has_older": bool(conn.execute("SELECT 1 FROM messages WHERE channel_id=? AND id<? LIMIT 1", (channel_id, oldest)).fetchone()),
+                    "has_newer": bool(conn.execute("SELECT 1 FROM messages WHERE channel_id=? AND id>? LIMIT 1", (channel_id, newest)).fetchone())}
+
     @app.get("/api/channels/{channel_id}/messages")
-    def history(channel_id: int, request: Request, before: int = 9223372036854775807):
+    def history(channel_id: int, request: Request, before: int = 9223372036854775807, after: int | None = None):
         auth(request)
         with db() as conn:
+            if after is not None:
+                return [public_message(r, conn) for r in conn.execute("SELECT messages.*,users.username,users.display_name,users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id>? ORDER BY messages.id LIMIT 50", (channel_id, after))]
             return [public_message(r, conn) for r in conn.execute("SELECT messages.*, users.username, users.display_name, users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id<? ORDER BY messages.id DESC LIMIT 50", (channel_id, before))][::-1]
 
     @app.post("/api/channels/{channel_id}/messages")
@@ -464,10 +589,16 @@ def create_app(database=None, limits=None):
             with db() as conn:
                 if not conn.execute("SELECT 1 FROM channels WHERE id=? AND kind='text'", (channel_id,)).fetchone():
                     raise HTTPException(404, "Text channel not found")
-                inserted = conn.execute("INSERT OR IGNORE INTO messages(channel_id,user_id,content,nonce,created) VALUES(?,?,?,?,?)", (channel_id, member["id"], body.content.strip(), body.nonce, time.time())).rowcount
+                conn.execute("BEGIN IMMEDIATE")
+                inserted = not conn.execute("SELECT 1 FROM messages WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone()
+                if inserted:
+                    next_id = conn.execute("UPDATE message_sequence SET value=value+1 WHERE id=1 RETURNING value").fetchone()[0]
+                    conn.execute("INSERT INTO messages(id,channel_id,user_id,content,nonce,created) VALUES(?,?,?,?,?,?)", (next_id, channel_id, member["id"], body.content.strip(), body.nonce, time.time()))
                 row = conn.execute("SELECT messages.*,users.username,users.display_name,users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone()
                 if row["channel_id"] != channel_id:
                     raise HTTPException(409, "This send identifier belongs to another channel")
+                if inserted:
+                    sync_mentions(conn, row["id"], row["content"])
                 result = public_message(row, conn)
             if inserted:
                 hub.publish({"type": "message", "message": result})
@@ -493,6 +624,7 @@ def create_app(database=None, limits=None):
                     changed = time.time()
                     conn.execute("INSERT INTO message_versions VALUES(?,?,?,?,?,?)", (message_id, row["version"], row["content"], changed, member["id"], "edit"))
                     conn.execute("UPDATE messages SET content=?,edited=?,version=version+1 WHERE id=?", (content, changed, message_id))
+                    sync_mentions(conn, message_id, content)
                 result = public_message(message_row(conn, message_id), conn)
             hub.publish({"type": "message_update", "message": result})
         return result
@@ -510,6 +642,7 @@ def create_app(database=None, limits=None):
                     changed = time.time()
                     conn.execute("INSERT INTO message_versions VALUES(?,?,?,?,?,?)", (message_id, row["version"], row["content"], changed, member["id"], "delete"))
                     conn.execute("UPDATE messages SET deleted=?,deleted_by=?,version=version+1 WHERE id=?", (changed, member["id"], message_id))
+                    sync_mentions(conn, message_id, "")
                 result = public_message(message_row(conn, message_id), conn)
             hub.publish({"type": "message_update", "message": result})
         return result

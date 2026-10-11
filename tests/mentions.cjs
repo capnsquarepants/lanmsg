@@ -27,7 +27,7 @@ assert.equal(children[0].text,'<script> ');
 // Exercise live badge state and desktop delivery with browser APIs represented by fakes.
 const elements = new Map(), delivered = [];
 const live = vm.createContext({Mentions:M,console,setTimeout:() => 0,isSecureContext:true,
-  document:{visibilityState:'hidden',hasFocus:() => false,addEventListener:() => {},getElementById:id => {
+  document:{createElement:() => ({}),visibilityState:'hidden',hasFocus:() => false,addEventListener:() => {},getElementById:id => {
     if(!elements.has(id)) elements.set(id,{textContent:'LANmsg',addEventListener:() => {}});
     return elements.get(id);
   }},window:{addEventListener:() => {}},
@@ -35,15 +35,15 @@ const live = vm.createContext({Mentions:M,console,setTimeout:() => 0,isSecureCon
 });
 const app = fs.readFileSync(__dirname + '/../lanmsg/static/app.js','utf8');
 vm.runInContext(app.slice(0,app.indexOf('function receiveServerSettings(')),live);
-vm.runInContext(`member={id:2,notifications:'mentions',desktop_notifications:true};channelList=[{id:1,name:'general'}];loadChannels=async()=>{};showError=()=>{};`,live);
+vm.runInContext(`member={id:2,notifications:'mentions',desktop_notifications:true};channelList=[{id:1,name:'general'}];loadChannels=async()=>{};showError=()=>{};scheduleReadRefresh=()=>{};`,live);
 live.event = {...message,display_name:'Sender'};
 vm.runInContext('receiveAlert(event);receiveAlert(event);',live);
 assert.equal(delivered.length,1);
 assert.equal(delivered[0].options.body,'Mentioned you');
-assert.equal(vm.runInContext('mentionUnread.get(1).size',live),1);
-assert.match(live.document.title,/1 mentions/);
+vm.runInContext('readStates.set(1,{mentions:2,unread:3});updateAlertTitle();',live);
+assert.match(live.document.title,/2 mentions/);
 vm.runInContext('removeMentionAlert({...event,mentions:[]});',live);
-assert.equal(vm.runInContext('mentionUnread.size',live),0);
+assert.equal(vm.runInContext('desktopAlerts.size',live),0);
 live.event = {...message,id:2};
 vm.runInContext('member.notifications="none";receiveAlert(event);',live);
 assert.equal(delivered.length,1);
