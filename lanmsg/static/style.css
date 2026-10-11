@@ -180,3 +180,11 @@ legend { color: var(--muted); font-size: .8rem; padding: 0 6px; }
   .theme-grid { grid-template-columns: 1fr; }
   .channel-caption { display: none; }
 }
+
+.mention { color: var(--accent); background: var(--panel); border: 0; padding: 0 2px; font: inherit; cursor: pointer; }
+.mention:hover, .mention:focus-visible { text-decoration: underline; }
+.message.mentioned { border-left: 2px solid var(--accent); background: var(--panel); }
+#channels .has-mentions { color: var(--accent); font-weight: bold; }
+#mention-suggestions { max-height: 180px; overflow-y: auto; border: 1px solid var(--border); background: var(--sidebar); margin-bottom: 8px; }
+#mention-suggestions button { display: block; width: 100%; text-align: left; background: transparent; color: var(--text); border: 0; }
+#mention-suggestions button.selected, #mention-suggestions button:hover { background: var(--panel); color: var(--accent); }

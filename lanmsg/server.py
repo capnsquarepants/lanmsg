@@ -77,6 +77,8 @@ class ManagedProfile(ProfileUpdate):
     bio: str = Field(default="", max_length=160)
     nickname_color: Literal["default", "accent", "text"] = "default"
     media_previews: bool | None = None
+    notifications: Literal["mentions", "all", "none"] = "mentions"
+    desktop_notifications: bool = False
 
     @field_validator("bio")
     @classmethod
@@ -126,7 +128,7 @@ def create_app(database=None, limits=None):
             conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
         conn.execute("UPDATE users SET display_name=username WHERE display_name=''")
         user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
-        for column, declaration in (("bio", "TEXT NOT NULL DEFAULT ''"), ("nickname_color", "TEXT NOT NULL DEFAULT 'default'"), ("media_previews", "INTEGER NOT NULL DEFAULT 0")):
+        for column, declaration in (("notifications", "TEXT NOT NULL DEFAULT 'mentions'"), ("desktop_notifications", "INTEGER NOT NULL DEFAULT 0"), ("bio", "TEXT NOT NULL DEFAULT ''"), ("nickname_color", "TEXT NOT NULL DEFAULT 'default'"), ("media_previews", "INTEGER NOT NULL DEFAULT 0")):
             if column not in user_columns:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {column} {declaration}")
         if "media_preview_override" not in user_columns:
@@ -346,17 +348,23 @@ def create_app(database=None, limits=None):
         member = auth(request)
         with db() as conn:
             profile = profile_row(conn, member["id"])
-            enabled = conn.execute("SELECT media_preview_override FROM users WHERE id=?", (member["id"],)).fetchone()[0]
-        return {**profile, "media_previews": None if enabled is None else bool(enabled)}
+            enabled = conn.execute("SELECT media_preview_override,notifications,desktop_notifications FROM users WHERE id=?", (member["id"],)).fetchone()
+        return {**profile, "media_previews": None if enabled[0] is None else bool(enabled[0]), "notifications": enabled[1], "desktop_notifications": bool(enabled[2])}
 
     @app.put("/api/me/profile")
     def save_profile(body: ManagedProfile, request: Request):
         member = auth(request)
         with db() as conn:
-            conn.execute("UPDATE users SET display_name=?,bio=?,nickname_color=?,media_preview_override=? WHERE id=?", (body.display_name, body.bio, body.nickname_color, body.media_previews, member["id"]))
+            conn.execute("UPDATE users SET display_name=?,bio=?,nickname_color=?,media_preview_override=?,notifications=?,desktop_notifications=? WHERE id=?", (body.display_name, body.bio, body.nickname_color, body.media_previews, body.notifications, body.desktop_notifications, member["id"]))
             profile = profile_row(conn, member["id"])
         hub.publish({"type": "profile", "profile": profile})
-        return {**profile, "media_previews": body.media_previews}
+        return {**profile, "media_previews": body.media_previews, "notifications": body.notifications, "desktop_notifications": body.desktop_notifications}
+
+    @app.get("/api/users")
+    def member_directory(request: Request):
+        auth(request)
+        with db() as conn:
+            return [dict(row) for row in conn.execute("SELECT id,username,display_name FROM users ORDER BY username COLLATE NOCASE")]
 
     @app.get("/api/users/{user_id}/profile")
     def public_profile(user_id: int, request: Request):
@@ -423,9 +431,16 @@ def create_app(database=None, limits=None):
             conn.execute("INSERT INTO invites(token,expires) VALUES(?,?)", (token, time.time() + 7 * 86400))
         return {"invite": token}
 
-    def public_message(row):
+    def public_message(row, conn):
         result = {key: row[key] for key in ("id", "channel_id", "user_id", "created", "username", "display_name", "nickname_color", "version", "edited", "deleted")}
         result["content"] = "" if row["deleted"] is not None else row["content"]
+        result["mentions"] = []
+        if result["content"]:
+            # Ignore URL tokens and email addresses; handles have ASCII account syntax.
+            text = re.sub(r'https?://[^\s<>"`]+', ' ', result["content"], flags=re.I)
+            handles = sorted(set(match.lower() for match in re.findall(r"(?<![\w@/])@([a-zA-Z0-9_-]{2,32})(?![\w-])", text)))
+            if handles:
+                result["mentions"] = [dict(user) for user in conn.execute("SELECT id,username FROM users WHERE lower(username) IN (" + ",".join("?" for _ in handles) + ") ORDER BY id", handles)]
         return result
 
     def message_row(conn, message_id):
@@ -438,7 +453,7 @@ def create_app(database=None, limits=None):
     def history(channel_id: int, request: Request, before: int = 9223372036854775807):
         auth(request)
         with db() as conn:
-            return [public_message(r) for r in conn.execute("SELECT messages.*, users.username, users.display_name, users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id<? ORDER BY messages.id DESC LIMIT 50", (channel_id, before))][::-1]
+            return [public_message(r, conn) for r in conn.execute("SELECT messages.*, users.username, users.display_name, users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id<? ORDER BY messages.id DESC LIMIT 50", (channel_id, before))][::-1]
 
     @app.post("/api/channels/{channel_id}/messages")
     def send(channel_id: int, body: Message, request: Request):
@@ -449,12 +464,13 @@ def create_app(database=None, limits=None):
             with db() as conn:
                 if not conn.execute("SELECT 1 FROM channels WHERE id=? AND kind='text'", (channel_id,)).fetchone():
                     raise HTTPException(404, "Text channel not found")
-                conn.execute("INSERT OR IGNORE INTO messages(channel_id,user_id,content,nonce,created) VALUES(?,?,?,?,?)", (channel_id, member["id"], body.content.strip(), body.nonce, time.time()))
+                inserted = conn.execute("INSERT OR IGNORE INTO messages(channel_id,user_id,content,nonce,created) VALUES(?,?,?,?,?)", (channel_id, member["id"], body.content.strip(), body.nonce, time.time())).rowcount
                 row = conn.execute("SELECT messages.*,users.username,users.display_name,users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone()
                 if row["channel_id"] != channel_id:
                     raise HTTPException(409, "This send identifier belongs to another channel")
-                result = public_message(row)
-            hub.publish({"type": "message", "message": result})
+                result = public_message(row, conn)
+            if inserted:
+                hub.publish({"type": "message", "message": result})
         return result
 
     @app.put("/api/messages/{message_id}")
@@ -477,7 +493,7 @@ def create_app(database=None, limits=None):
                     changed = time.time()
                     conn.execute("INSERT INTO message_versions VALUES(?,?,?,?,?,?)", (message_id, row["version"], row["content"], changed, member["id"], "edit"))
                     conn.execute("UPDATE messages SET content=?,edited=?,version=version+1 WHERE id=?", (content, changed, message_id))
-                result = public_message(message_row(conn, message_id))
+                result = public_message(message_row(conn, message_id), conn)
             hub.publish({"type": "message_update", "message": result})
         return result
 
@@ -494,7 +510,7 @@ def create_app(database=None, limits=None):
                     changed = time.time()
                     conn.execute("INSERT INTO message_versions VALUES(?,?,?,?,?,?)", (message_id, row["version"], row["content"], changed, member["id"], "delete"))
                     conn.execute("UPDATE messages SET deleted=?,deleted_by=?,version=version+1 WHERE id=?", (changed, member["id"], message_id))
-                result = public_message(message_row(conn, message_id))
+                result = public_message(message_row(conn, message_id), conn)
             hub.publish({"type": "message_update", "message": result})
         return result
 

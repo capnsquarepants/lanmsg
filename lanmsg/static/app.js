@@ -2,19 +2,106 @@
 const $ = id => document.getElementById(id);
 let member, channel = 1, channelList = [], registering = false, socket, heartbeat, reconnectTimer;
 let generation = 0, messages = new Map(), pendingSend, loading = false;
-const unread = new Set();
+const unread = new Set(), mentionUnread = new Map(), seenEvents = new Set();
+let directory = [], directoryFetched = 0, directoryFetching = false, suggestionIndex = 0, suggestionState = null;
 const messageRows = new Map(), dayRows = new Map();
 let serverMediaPreviews = false;
 let editingMessage = null, editDraft = '', editVersion = 0, savingMessage = false;
 let savingAdmin = false, activeAdminSection = 'settings';
 const LIMIT_LABELS = {connections:'Total connections', connections_per_ip:'Connections per IP', connections_per_session:'Connections per session', http_concurrency:'Concurrent API requests', message_rate:'Messages per second / account', message_burst:'Message burst / account'};
+const desktopAlerts = new Map();
+function updateAlertTitle() {
+  const count = [...mentionUnread.values()].reduce((sum,ids) => sum + ids.size,0);
+  document.title = (count ? '(' + count + ' mentions) ' : '') + ($('server-name').textContent || 'LANmsg') + ' · LANmsg';
+}
+function notificationStatus() {
+  const supported = globalThis.isSecureContext && 'Notification' in globalThis;
+  $('notification-permission').disabled = !supported;
+  $('notification-status').textContent = !supported ? 'Desktop alerts need a supported browser and HTTPS (or localhost). Channel badges still work.' : 'Device permission: ' + Notification.permission + '. Save your profile to apply your preferences.';
+}
+$('notification-permission').onclick = async () => {
+  try { if(globalThis.isSecureContext && 'Notification' in globalThis) await Notification.requestPermission(); }
+  catch(error) { $('display-name-error').textContent = error.message; }
+  notificationStatus();
+};
+function receiveAlert(message) {
+  if(!member || seenEvents.has(message.id)) return;
+  seenEvents.add(message.id); if(seenEvents.size > 2000) seenEvents.delete(seenEvents.values().next().value);
+  const focused = document.visibilityState === 'visible' && document.hasFocus();
+  if(message.user_id !== member.id && Mentions.isMention(message,member.id) && !(message.channel_id === channel && focused)) {
+    const ids = mentionUnread.get(message.channel_id) || new Set(); ids.add(message.id);
+    if(ids.size > 1000) ids.delete(ids.values().next().value);
+    mentionUnread.set(message.channel_id,ids); updateAlertTitle(); loadChannels().catch(showError);
+  }
+  if(!Mentions.shouldAlert(message,member,channel,focused) || !member.desktop_notifications || !globalThis.isSecureContext || !('Notification' in globalThis) || Notification.permission !== 'granted') return;
+  // Visible channels already have their own badges; avoid OS alerts while using the app.
+  if(focused) return;
+  try {
+    const name = channelList.find(c => c.id === message.channel_id)?.name || 'channel';
+    const alert = new Notification((message.display_name || message.username) + ' in #' + name,{body:Mentions.isMention(message,member.id) ? 'Mentioned you' : 'New message',tag:'lanmsg-' + message.channel_id});
+    desktopAlerts.get(message.channel_id)?.close(); alert.messageId = message.id; desktopAlerts.set(message.channel_id,alert);
+    alert.onclick = () => { window.focus(); select(message.channel_id).catch(showError); alert.close(); };
+    setTimeout(() => { alert.close(); if(desktopAlerts.get(message.channel_id) === alert) desktopAlerts.delete(message.channel_id); },15000);
+  } catch { /* Embedded browsers may expose the API without supporting its constructor. */ }
+}
+function removeMentionAlert(message) {
+  if(!Mentions.isMention(message,member?.id)) {
+    const ids = mentionUnread.get(message.channel_id); ids?.delete(message.id);
+    if(ids && !ids.size) mentionUnread.delete(message.channel_id);
+    if(ids) { updateAlertTitle(); loadChannels().catch(showError); }
+    if(desktopAlerts.get(message.channel_id)?.messageId === message.id) { desktopAlerts.get(message.channel_id).close(); desktopAlerts.delete(message.channel_id); }
+  }
+}
+function clearCurrentAlerts() {
+  if(!member || document.visibilityState !== 'visible' || !document.hasFocus()) return;
+  unread.delete(channel); mentionUnread.delete(channel); updateAlertTitle(); loadChannels().catch(showError);
+  desktopAlerts.get(channel)?.close(); desktopAlerts.delete(channel);
+}
+window.addEventListener('focus',clearCurrentAlerts);
+document.addEventListener('visibilitychange',clearCurrentAlerts);
+function hideSuggestions() { suggestionState = null; $('mention-suggestions').hidden = true; $('mention-suggestions').replaceChildren(); }
+function chooseSuggestion(index) {
+  const state = suggestionState, user = state?.users[index]; if(!user) return;
+  const input = $('content'); input.setRangeText('@' + user.username + ' ',state.start,state.end,'end');
+  hideSuggestions(); input.focus();
+}
+function drawSuggestions() {
+  const list = $('mention-suggestions');
+  list.replaceChildren(...suggestionState.users.map((user,index) => {
+    const button = document.createElement('button'); button.type = 'button'; button.className = index === suggestionIndex ? 'selected' : '';
+    button.textContent = '@' + user.username + ' — ' + user.display_name;
+    button.onmousedown = event => event.preventDefault(); button.onclick = () => chooseSuggestion(index); return button;
+  })); list.hidden = false;
+}
+function refreshSuggestions() {
+  const input = $('content'); suggestionState = Mentions.suggestions(input.value,input.selectionStart,directory);
+  if(!suggestionState) { hideSuggestions(); return; }
+  if(suggestionState.users.length) { suggestionIndex = 0; drawSuggestions(); } else $('mention-suggestions').hidden = true;
+  if(!directoryFetching && Date.now() - directoryFetched > 30000) {
+    directoryFetching = true; directoryFetched = Date.now();
+    api('/users').then(users => { directory = users; if(document.activeElement === input) refreshSuggestions(); }).catch(showError).finally(() => { directoryFetching = false; });
+  }
+}
+function suggestionKey(event) {
+  if(!suggestionState?.users.length || event.isComposing) return false;
+  if(['ArrowDown','ArrowUp'].includes(event.key)) {
+    event.preventDefault(); suggestionIndex = (suggestionIndex + (event.key === 'ArrowDown' ? 1 : -1) + suggestionState.users.length) % suggestionState.users.length; drawSuggestions(); return true;
+  }
+  if((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') { event.preventDefault(); chooseSuggestion(suggestionIndex); return true; }
+  if(event.key === 'Escape') { event.preventDefault(); hideSuggestions(); return true; }
+  return false;
+}
+$('content').addEventListener('input',refreshSuggestions);
+$('content').addEventListener('click',refreshSuggestions);
+$('content').addEventListener('keyup',event => { if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) refreshSuggestions(); });
+$('content').addEventListener('blur',() => { setTimeout(() => { if(!$('mention-suggestions').contains(document.activeElement)) hideSuggestions(); },150); });
 function receiveServerSettings(settings) {
   $('server-name').textContent = settings.server_name;
   $('server-description').textContent = settings.server_description;
   document.title = settings.server_name + ' · LANmsg';
   $('toggle-auth').hidden = !settings.registration_enabled;
   serverMediaPreviews = settings.media_previews === true;
-  updateMediaPreference(member?.media_previews ?? null);
+  updateMediaPreference(member?.media_previews ?? null); updateAlertTitle();
   if(!settings.registration_enabled && registering) { registering = false; authMode(); }
 }
 async function loadServerSettings() { receiveServerSettings(await api('/status')); }
@@ -113,6 +200,9 @@ function showUser(profile) {
   $('user-bio').textContent = profile.bio || ''; $('user-bio').hidden = !profile.bio;
 }
 function receiveProfile(profile) {
+  const entry = directory.find(user => user.id === profile.id);
+  if(entry) Object.assign(entry,profile);
+  else if(profile.username) directory.push({id:profile.id,username:profile.username,display_name:profile.display_name});
   profileUpdates.set(profile.id, {...profileUpdates.get(profile.id), ...profile});
   if(member?.id === profile.id) { member = {...member, ...profile}; refreshIdentity(); }
   if(viewedUserId === profile.id && $('user-dialog').open) showUser(profileUpdates.get(profile.id));
@@ -133,6 +223,7 @@ $('identity').onclick = async () => {
   try {
     const profile = await api('/me/profile'); member = {...member, ...profile}; refreshIdentity();
     updateMediaPreference(profile.media_previews);
+    $('profile-notifications').value = profile.notifications; $('profile-desktop-notifications').checked = profile.desktop_notifications; notificationStatus();
     $('profile-bio').value = profile.bio; $('profile-color').value = profile.nickname_color;
     $('profile-media-previews').value = profile.media_previews === null ? 'default' : profile.media_previews ? 'allow' : 'deny';
     $('display-name').value = member.display_name;
@@ -148,9 +239,10 @@ $('display-name-form').onsubmit = async event => {
   event.preventDefault(); if(savingName) return;
   savingName = true; $('display-name-save').disabled = true; $('display-name-error').textContent = '';
   try {
-    const profile = await api('/me/profile', {method:'PUT', body:JSON.stringify({display_name:$('display-name').value, bio:$('profile-bio').value, nickname_color:$('profile-color').value, media_previews:$('profile-media-previews').value === 'default' ? null : $('profile-media-previews').value === 'allow'})});
+    const profile = await api('/me/profile', {method:'PUT', body:JSON.stringify({display_name:$('display-name').value, bio:$('profile-bio').value, nickname_color:$('profile-color').value, notifications:$('profile-notifications').value, desktop_notifications:$('profile-desktop-notifications').checked, media_previews:$('profile-media-previews').value === 'default' ? null : $('profile-media-previews').value === 'allow'})});
     updateMediaPreference(profile.media_previews); member.media_previews = profile.media_previews;
-    const {media_previews, ...publicProfile} = profile; receiveProfile(publicProfile); $('display-name-dialog').close();
+    member = {...member, ...profile};
+    const {media_previews, notifications, desktop_notifications, ...publicProfile} = profile; receiveProfile(publicProfile); $('display-name-dialog').close();
   } catch(error) { $('display-name-error').textContent = error.message; }
   finally { savingName = false; $('display-name-save').disabled = false; }
 };
@@ -247,8 +339,9 @@ $('login').onsubmit = async event => {
 async function loadChannels() {
   channelList = await api('/channels');
   $('channels').replaceChildren(...channelList.filter(c => c.kind === 'text').map(c => {
-    const button = document.createElement('button'); button.textContent = '#' + c.name;
+    const button = document.createElement('button'); button.textContent = '#' + c.name + (mentionUnread.get(c.id)?.size ? ' @' + mentionUnread.get(c.id).size : '');
     button.className = (c.id === channel ? 'active ' : '') + (unread.has(c.id) ? 'unread' : '');
+    if(mentionUnread.get(c.id)?.size) button.classList.add('has-mentions');
     if (c.id === channel) button.setAttribute('aria-current','page');
     button.onclick = () => select(c.id).catch(showError); return button;
   }));
@@ -337,16 +430,18 @@ function render() {
       rows.push(divider); previousDay = day;
     }
     const profile = {...m, ...profileUpdates.get(m.user_id)}, displayName = profile.display_name || profile.username;
-    const signature = JSON.stringify([m.version, m.content, m.deleted, m.edited, profile.display_name, profile.username, profile.nickname_color, mediaPreviewsEnabled, member?.owner]);
+    const signature = JSON.stringify([m.version, m.content, m.deleted, m.edited, profile.display_name, profile.username, profile.nickname_color, mediaPreviewsEnabled, member?.owner, m.mentions]);
     const cached = messageRows.get(m.id);
     if(editingMessage !== m.id && cached?.signature === signature) { rows.push(cached.item); continue; }
     const item = document.createElement('article'); item.className = 'message' + (m.user_id === member?.id ? ' self' : '');
+    if(Mentions.isMention(m,member?.id)) item.classList.add('mentioned');
+    item.id = 'message-' + m.id;
     const name = document.createElement('button'); name.type = 'button'; name.className = 'nickname'; name.textContent = '<' + displayName + '>'; name.title = displayName + ' (@' + profile.username + ')';
     name.style.color = nicknameColor(profile);
     name.setAttribute('aria-label', 'View ' + displayName + ', @' + profile.username); name.onclick = () => openUser(m.user_id);
     const date = document.createElement('time'); date.dateTime = timestamp.toISOString(); date.textContent = timestamp.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',hour12:false}); date.title = timestamp.toLocaleString();
     const body = document.createElement('div'); body.className = 'body';
-    if(m.deleted) body.textContent = 'Message deleted'; else MediaPreviews.appendText(body, m.content);
+    if(m.deleted) body.textContent = 'Message deleted'; else Mentions.append(body, m.content, m.mentions, openUser);
     if(m.deleted) body.classList.add('deleted-message');
     if(m.edited && !m.deleted) {
       const marker = document.createElement('small'); marker.className = 'edited-marker'; marker.textContent = ' (edited)'; marker.title = new Date(m.edited*1000).toLocaleString(); body.append(marker);
@@ -387,7 +482,7 @@ function render() {
   if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
 }
 async function select(id) {
-  channel = id; const current = ++generation; messages.clear(); if(!savingMessage) { editingMessage = null; editDraft = ''; } unread.delete(id);
+  channel = id; const current = ++generation; messages.clear(); if(!savingMessage) { editingMessage = null; editDraft = ''; } unread.delete(id); mentionUnread.delete(id); desktopAlerts.get(id)?.close(); desktopAlerts.delete(id); updateAlertTitle(); hideSuggestions();
   ChannelState.save(member.id, id);
   const name = channelList.find(c => c.id === id)?.name || 'general';
   $('channel-title').textContent = '#' + name; $('status-channel').textContent = '#' + name; $('content').placeholder = 'Message #' + name;
@@ -414,6 +509,7 @@ function connect() {
     $('connection').textContent = 'Connected'; $('connection').dataset.state = 'online';
     heartbeat = setInterval(() => { if(socket.readyState === WebSocket.OPEN) socket.send('ping'); },20000);
     try {
+      directory = await api('/users');
       profileUpdates.clear(); member = {...await api('/me'), ...await api('/me/profile')};
       updateMediaPreference(member.media_previews);
       if(profileUpdates.has(member.id)) member = {...member, ...profileUpdates.get(member.id)};
@@ -424,16 +520,18 @@ function connect() {
     const data = JSON.parse(event.data);
     if(data.type === 'profile') {
       receiveProfile(data.profile);
-      if(data.profile.id === member?.id) api('/me/profile').then(profile => updateMediaPreference(profile.media_previews)).catch(showError);
+      if(data.profile.id === member?.id) api('/me/profile').then(profile => { member = {...member,...profile}; updateMediaPreference(profile.media_previews); }).catch(showError);
     }
     if(data.type === 'server_settings') receiveServerSettings(data.settings);
     if(data.type === 'appearance') receiveTheme(data.appearance);
     if(data.type === 'channels') loadChannels().catch(showError);
     if(data.type === 'message_update') {
+      removeMentionAlert(data.message);
       if(data.message.channel_id === channel) { mergeMessage(data.message); render(); }
     }
     if(data.type === 'message') {
       const m = data.message;
+      receiveAlert(m);
       if(m.channel_id === channel) { mergeMessage(m); render(); }
       else { unread.add(m.channel_id); loadChannels().catch(showError); }
     }
@@ -444,6 +542,7 @@ async function start() {
   const profile = await api('/me/profile'); member = {...member, ...profile}; updateMediaPreference(profile.media_previews);
   $('auth').hidden = true; $('chat').hidden = false; $('admin').hidden = !member.owner;
   refreshIdentity();
+  directory = await api('/users'); seenEvents.clear(); mentionUnread.clear(); unread.clear();
   await loadChannels();
   channel = ChannelState.restore(member.id, channelList);
   await select(channel); connect();
@@ -457,12 +556,12 @@ $('composer').onsubmit = async event => {
   try {
     const m = await api(`/channels/${attempt.channel}/messages`, {method:'POST', body:JSON.stringify(attempt)});
     if(channel === m.channel_id) { mergeMessage(m); render(); }
-    if($('content').value.trim() === attempt.content) $('content').value = '';
+    if($('content').value.trim() === attempt.content) $('content').value = ''; hideSuggestions();
     pendingSend = null;
   } catch(error) { showError(new Error('Message not confirmed. Press Send to retry. ' + error.message)); }
   finally { $('send').disabled = false; $('content').focus(); }
 };
-$('content').onkeydown = event => { if(event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if(!$('send').disabled) $('composer').requestSubmit(); } };
+$('content').onkeydown = event => { if(suggestionKey(event)) return; if(event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if(!$('send').disabled) $('composer').requestSubmit(); } };
 $('admin-channel-name').oninput = () => {
   const input = $('admin-channel-name'); input.value = input.value.toLowerCase().replace(/\s+/g, '-');
 };

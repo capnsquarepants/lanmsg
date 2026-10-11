@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LANmsg</title><link rel="stylesheet" href="/static/style.css"><script src="/static/channel-state.js" defer></script><script src="/static/media.js" defer></script><script src="/static/app.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LANmsg</title><link rel="stylesheet" href="/static/style.css"><script src="/static/channel-state.js" defer></script><script src="/static/media.js" defer></script><script src="/static/mentions.js" defer></script><script src="/static/app.js" defer></script></head>
 <body>
 <section id="auth" class="welcome">
   <form id="login"><div class="brand"><span class="brand-mark">#</span><span>LANmsg</span></div><h1>A place to talk.</h1><p id="auth-hint">Sign in to your community.</p>
@@ -17,7 +17,7 @@
   </aside>
   <section class="conversation"><header><div><h1 id="channel-title">#general</h1><p class="channel-caption">Text channel · Make yourself at home</p></div><span class="header-label">LANmsg / text</span></header>
     <div id="messages" role="log" aria-label="Messages"><button id="older" class="quiet" hidden>↑ Load earlier messages</button><div id="message-list"></div><p id="empty" class="system-line" hidden>No messages yet. Start the conversation.</p></div>
-    <div class="compose-area"><form id="composer"><span id="composer-nick" class="composer-nick" aria-hidden="true"></span><label class="sr-only" for="content">Message</label><textarea id="content" placeholder="Message #general" maxlength="4000" rows="1" required></textarea><button id="send">Send ↵</button></form>
+    <div class="compose-area"><div id="mention-suggestions" role="group" aria-label="Mention suggestions" hidden></div><form id="composer"><span id="composer-nick" class="composer-nick" aria-hidden="true"></span><label class="sr-only" for="content">Message</label><textarea id="content" placeholder="Message #general" maxlength="4000" rows="1" required></textarea><button id="send">Send ↵</button></form>
     <p id="chat-error" role="alert"></p></div>
     <div class="status-bar"><span id="connection" role="status">Connecting…</span><span id="status-channel">#general</span><span class="composer-hint">Enter to send · Shift+Enter for a new line</span></div>
   </section>
@@ -82,6 +82,7 @@
     <label>Bio<textarea id="profile-bio" maxlength="160" rows="3" placeholder="A little about you"></textarea></label>
     <label>Nickname color<select id="profile-color"><option value="default">Server default</option><option value="accent">Server accent</option><option value="text">Message text color</option></select></label>
     <fieldset><legend>Media preferences</legend><label>Media previews<select id="profile-media-previews"><option value="default">Use server setting</option><option value="allow">Always allow</option><option value="deny">Never allow</option></select></label><p class="admin-help">Your choice overrides the server default, including for YouTube embeds. Previews load media from the linked site; videos never autoplay.</p></fieldset>
+    <fieldset><legend>Notifications</legend><label>Alert me about<select id="profile-notifications"><option value="mentions">Mentions only</option><option value="all">All messages</option><option value="none">Nothing</option></select></label><label class="checkbox-label"><input id="profile-desktop-notifications" type="checkbox">Desktop notifications</label><button id="notification-permission" type="button" class="quiet">Allow desktop notifications on this device</button><p id="notification-status" class="admin-help"></p><p class="admin-help">Alerts arrive while the client is open. Desktop alerts contain the sender and channel, without message text.</p></fieldset>
     <p id="display-name-error" role="alert"></p><div class="dialog-actions"><button id="display-name-cancel" type="button" class="quiet">Cancel</button><button id="display-name-save">Save profile</button></div>
   </form>
 </dialog>
