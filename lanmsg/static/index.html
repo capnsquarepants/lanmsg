@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LANmsg</title><link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script></head>
+<body>
+<section id="auth" class="welcome">
+  <form id="login"><div class="brand">L<span>LANmsg</span></div><h1>Your people. Your server.</h1><p id="auth-hint">Sign in to your community.</p>
+  <label>Username<input id="username" autocomplete="username" minlength="2" maxlength="32" required pattern="[a-zA-Z0-9_-]+"></label>
+  <label>Password<input id="password" type="password" autocomplete="current-password" minlength="10" maxlength="128" required></label>
+  <label id="invite-label" hidden>Invite code<input id="invite" autocomplete="off"></label>
+  <button id="submit-auth">Sign in</button><button type="button" class="quiet" id="toggle-auth">Create an account</button><p id="auth-error" role="alert"></p></form>
+</section>
+<main id="chat" hidden>
+  <aside><div class="brand">L<span>LANmsg</span></div><p class="section-label">TEXT CHANNELS</p><nav id="channels" aria-label="Text channels"></nav>
+    <div id="admin" hidden><button id="add-channel" class="quiet">+ New channel</button><button id="invite-button" class="quiet">Create invite</button></div>
+    <div class="voice"><strong>Voice</strong><p>Planned for a future release</p></div>
+    <footer><span id="identity"></span><button id="logout" class="quiet">Sign out</button></footer>
+  </aside>
+  <section class="conversation"><header><h1 id="channel-title"># general</h1><span id="connection" role="status">Connecting…</span></header>
+    <div id="messages" role="log" aria-label="Messages"><button id="older" class="quiet">Load older messages</button><div id="message-list"></div><p id="empty" hidden>No messages yet. Start the conversation.</p></div>
+    <form id="composer"><label class="sr-only" for="content">Message</label><textarea id="content" placeholder="Message #general" maxlength="4000" rows="2" required></textarea><button id="send">Send</button></form>
+    <p class="composer-hint">Enter to send · Shift+Enter for a new line</p><p id="chat-error" role="alert"></p>
+  </section>
+</main>
+</body></html>
