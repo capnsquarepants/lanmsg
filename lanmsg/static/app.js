@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 let member, channel = 1, channelList = [], registering = false, socket, heartbeat, reconnectTimer;
 let generation = 0, messages = new Map(), pendingSend, loading = false;
 const unread = new Set();
-let savingAdmin = false;
+let savingAdmin = false, activeAdminSection = 'settings';
 const LIMIT_LABELS = {connections:'Total connections', connections_per_ip:'Connections per IP', connections_per_session:'Connections per session', http_concurrency:'Concurrent API requests', message_rate:'Messages per second / account', message_burst:'Message burst / account'};
 function receiveServerSettings(settings) {
   $('server-name').textContent = settings.server_name;
@@ -13,7 +13,21 @@ function receiveServerSettings(settings) {
   if(!settings.registration_enabled && registering) { registering = false; authMode(); }
 }
 async function loadServerSettings() { receiveServerSettings(await api('/status')); }
-function adminError(error) { $('admin-error').textContent = error.message; }
+function clearAdminFeedback() { $('admin-error').textContent = ''; $('admin-notice').textContent = ''; }
+function adminError(error, section) { if(activeAdminSection === section) $('admin-error').textContent = error.message; }
+function adminNotice(message, section) { if(activeAdminSection === section) $('admin-notice').textContent = message; }
+function selectAdminSection(section) {
+  if(savingAdmin || savingTheme) return;
+  editingTheme = false; applyTheme(savedTheme); clearAdminFeedback();
+  activeAdminSection = section; $('appearance-error').textContent = '';
+  for(const tab of document.querySelectorAll('[data-admin-section]')) {
+    const active = section === tab.dataset.adminSection;
+    tab.classList.toggle('active',active); tab.setAttribute('aria-pressed',String(active));
+    $('admin-section-' + tab.dataset.adminSection).hidden = !active;
+  }
+  if(section === 'appearance') { editingTheme = true; fillThemeForm(savedTheme); $('theme-preset').value = 'custom'; }
+  $('admin-content').scrollTop = 0;
+}
 function showAdminSettings(data, fill = true) {
   const form = $('admin-settings-form');
   if(fill) for(const [key,value] of Object.entries(data.settings)) {
@@ -39,23 +53,19 @@ async function refreshAdmin(fill = true) {
     const item = document.createElement('li'), code = document.createElement('code'), expiry = document.createElement('small'), revoke = document.createElement('button');
     code.textContent = invite.token; expiry.textContent = 'Expires ' + new Date(invite.expires*1000).toLocaleString();
     revoke.type = 'button'; revoke.className = 'quiet'; revoke.textContent = 'Revoke';
-    revoke.onclick = async () => { revoke.disabled = true; try { await api('/admin/invites/' + encodeURIComponent(invite.token),{method:'DELETE'}); await refreshAdmin(false); } catch(error) { adminError(error); revoke.disabled = false; } };
+    revoke.onclick = async () => { revoke.disabled = true; clearAdminFeedback(); try { await api('/admin/invites/' + encodeURIComponent(invite.token),{method:'DELETE'}); await refreshAdmin(false); } catch(error) { adminError(error, 'invites'); revoke.disabled = false; } };
     item.append(code,expiry,revoke); return item;
   }));
   if(!data.invites.length) { const item = document.createElement('li'); item.textContent = 'No active invites.'; $('admin-invite-list').append(item); }
 }
 $('admin-open').onclick = async () => {
-  try { await refreshAdmin(); $('admin-error').textContent = ''; $('admin-notice').textContent = ''; $('admin-dialog').showModal(); }
+  try { await Promise.all([refreshAdmin(), loadAppearance()]); selectAdminSection('settings'); $('admin-dialog').showModal(); }
   catch(error) { showError(error); }
 };
-$('admin-close').onclick = () => { if(!savingAdmin) $('admin-dialog').close(); };
-$('admin-dialog').oncancel = event => { if(savingAdmin) event.preventDefault(); };
-for(const button of document.querySelectorAll('[data-admin-section]')) button.onclick = () => {
-  for(const tab of document.querySelectorAll('[data-admin-section]')) {
-    const active = button === tab; tab.classList.toggle('active',active); tab.setAttribute('aria-pressed',String(active));
-    $('admin-section-' + tab.dataset.adminSection).hidden = !active;
-  }
-};
+$('admin-close').onclick = () => { if(!savingAdmin && !savingTheme) $('admin-dialog').close(); };
+$('admin-dialog').oncancel = event => { if(savingAdmin || savingTheme) event.preventDefault(); };
+$('admin-dialog').onclose = () => { editingTheme = false; applyTheme(savedTheme); clearAdminFeedback(); };
+for(const button of document.querySelectorAll('[data-admin-section]')) button.onclick = () => selectAdminSection(button.dataset.adminSection);
 $('admin-settings-form').onsubmit = async event => {
   event.preventDefault(); if(savingAdmin) return;
   savingAdmin = true; $('admin-save').disabled = true; $('admin-error').textContent = ''; $('admin-notice').textContent = '';
@@ -66,8 +76,8 @@ $('admin-settings-form').onsubmit = async event => {
   }
   try {
     const result = await api('/admin/settings',{method:'PUT',body:JSON.stringify(body)});
-    showAdminSettings(result); receiveServerSettings(result.settings); $('admin-notice').textContent = 'Settings saved.';
-  } catch(error) { adminError(error); }
+    showAdminSettings(result); receiveServerSettings(result.settings); adminNotice('Settings saved.', 'settings');
+  } catch(error) { adminError(error, 'settings'); }
   finally { savingAdmin = false; $('admin-save').disabled = false; }
 };
 const profileUpdates = new Map();
@@ -129,7 +139,7 @@ const PRESETS = {
   classic: {...DEFAULT_THEME, background:'#0b120d', sidebar:'#101b13', panel:'#192a1d', text:'#c4e5cb', muted:'#86a58c', accent:'#83e69a', border:'#304b36', nickname:'#b9d99b', corner_radius:2},
   light: {...DEFAULT_THEME, background:'#f7f9fc', sidebar:'#edf1f6', panel:'#e2e9f1', text:'#233247', muted:'#546579', accent:'#176a58', border:'#c5d0dd', nickname:'#315d9c'}
 };
-let savedTheme = {...DEFAULT_THEME}, savingTheme = false;
+let savedTheme = {...DEFAULT_THEME}, savingTheme = false, editingTheme = false;
 function applyTheme(theme) {
   const root = document.documentElement;
   for (const key of Object.keys(COLOR_LABELS)) root.style.setProperty('--' + key, theme[key]);
@@ -141,7 +151,7 @@ function applyTheme(theme) {
 }
 function receiveTheme(theme) {
   savedTheme = {...theme};
-  if (!$('appearance-dialog').open) applyTheme(savedTheme);
+  if (!editingTheme) applyTheme(savedTheme);
 }
 async function loadAppearance() { receiveTheme(await api('/appearance')); }
 function fillThemeForm(theme) {
@@ -167,12 +177,6 @@ for (const [key,title] of Object.entries(COLOR_LABELS)) {
   const value = document.createElement('code'); value.id = 'color-value-' + key;
   control.append(input,value); label.append(control); $('theme-colors').append(label);
 }
-$('appearance-button').onclick = async () => {
-  try {
-    await loadAppearance(); fillThemeForm(savedTheme); $('theme-preset').value = 'custom';
-    $('appearance-error').textContent = ''; $('appearance-dialog').showModal();
-  } catch(error) { showError(error); }
-};
 $('appearance-form').oninput = event => {
   if (event.target.id === 'theme-preset') return;
   $('theme-preset').value = 'custom'; updateColorLabels();
@@ -183,17 +187,17 @@ $('theme-preset').onchange = () => {
   if(theme) { fillThemeForm(theme); applyTheme(theme); }
 };
 $('appearance-reset').onclick = () => { fillThemeForm(DEFAULT_THEME); applyTheme(DEFAULT_THEME); $('theme-preset').value = 'default'; };
-function closeAppearance() { if (!savingTheme) $('appearance-dialog').close(); }
-$('appearance-close').onclick = closeAppearance;
-$('appearance-cancel').onclick = closeAppearance;
-$('appearance-dialog').onclose = () => applyTheme(savedTheme);
-$('appearance-dialog').oncancel = event => { if(savingTheme) event.preventDefault(); };
+$('appearance-cancel').onclick = () => {
+  if(savingTheme) return;
+  fillThemeForm(savedTheme); applyTheme(savedTheme); $('theme-preset').value = 'custom';
+  $('appearance-error').textContent = ''; clearAdminFeedback();
+};
 $('appearance-form').onsubmit = async event => {
   event.preventDefault(); if(savingTheme) return;
-  savingTheme = true; $('appearance-save').disabled = true; $('appearance-error').textContent = '';
+  savingTheme = true; clearAdminFeedback(); $('appearance-save').disabled = true; $('appearance-error').textContent = '';
   try {
     receiveTheme(await api('/admin/appearance', {method:'PUT', body:JSON.stringify(readThemeForm())}));
-    $('appearance-dialog').close();
+    applyTheme(savedTheme); fillThemeForm(savedTheme); adminNotice('Appearance saved.', 'appearance');
   } catch(error) { $('appearance-error').textContent = error.message; }
   finally { savingTheme = false; $('appearance-save').disabled = false; }
 };
@@ -319,15 +323,18 @@ $('composer').onsubmit = async event => {
   finally { $('send').disabled = false; $('content').focus(); }
 };
 $('content').onkeydown = event => { if(event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if(!$('send').disabled) $('composer').requestSubmit(); } };
+$('admin-channel-name').oninput = () => {
+  const input = $('admin-channel-name'); input.value = input.value.toLowerCase().replace(/\s+/g, '-');
+};
 $('admin-channel-form').onsubmit = async event => {
-  event.preventDefault(); $('add-channel').disabled = true; $('admin-error').textContent = '';
+  event.preventDefault(); $('add-channel').disabled = true; clearAdminFeedback();
   try { await api('/admin/channels',{method:'POST',body:JSON.stringify({name:$('admin-channel-name').value})}); $('admin-channel-name').value = ''; await loadChannels(); await refreshAdmin(false); }
-  catch(error) { adminError(error); } finally { $('add-channel').disabled = false; }
+  catch(error) { adminError(error, 'channels'); } finally { $('add-channel').disabled = false; }
 };
 $('invite-button').onclick = async () => {
-  $('invite-button').disabled = true; $('admin-error').textContent = '';
-  try { await api('/admin/invites',{method:'POST'}); await refreshAdmin(false); $('admin-notice').textContent = 'Invite created. Select the code to copy it.'; }
-  catch(error) { adminError(error); } finally { $('invite-button').disabled = false; }
+  $('invite-button').disabled = true; clearAdminFeedback();
+  try { await api('/admin/invites',{method:'POST'}); await refreshAdmin(false); adminNotice('Invite created. Select the code to copy it.', 'invites'); }
+  catch(error) { adminError(error, 'invites'); } finally { $('invite-button').disabled = false; }
 };
 $('logout').onclick = async () => { try { await api('/session/logout',{method:'POST'}); socket.onclose = null; socket.close(); clearInterval(heartbeat); clearTimeout(reconnectTimer); location.reload(); } catch(error) { showError(error); } };
 (async () => {

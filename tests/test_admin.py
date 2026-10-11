@@ -7,6 +7,17 @@ from tests.test_server import register
 HEADERS = {'X-LANmsg':'1'}
 
 
+def test_channel_names_are_normalized_before_validation(tmp_path):
+    with TestClient(create_app(tmp_path/'chat.db')) as owner:
+        register(owner)
+        result = owner.post('/api/admin/channels',headers=HEADERS,json={'name':'  Another   TEST  '})
+        assert result.status_code == 200
+        assert any(channel['name'] == 'another-test' for channel in owner.get('/api/channels').json())
+        assert owner.post('/api/admin/channels',headers=HEADERS,json={'name':'ANOTHER TEST'}).status_code == 409
+        for invalid in (' ', 'bad! name', 'A'*33):
+            assert owner.post('/api/admin/channels',headers=HEADERS,json={'name':invalid}).status_code == 422
+
+
 def test_console_is_owner_only(tmp_path):
     app = create_app(tmp_path/'chat.db')
     with TestClient(app) as owner, TestClient(app) as guest:

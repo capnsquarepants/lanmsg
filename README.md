@@ -65,7 +65,8 @@ the initial display name. Broader profile management remains a follow-up.
 The server owner can open **Admin console → Appearance** in the channel sidebar. Adjust colors,
 monospace/system fonts, text size, line height, message row spacing, and corner
 radius. Choose Midnight IRC, Terminal green, or Daylight as a starting palette.
-Changes preview locally while the editor is open. **Cancel** or Escape restores
+Appearance controls are embedded in the fixed-height console, with scrolling content.
+Changes preview locally. **Discard changes**, switching tabs, or closing the console restores
 the saved theme; **Save for everyone** persists it in SQLite and updates connected
 clients immediately. **Reset to defaults** previews the default palette until saved.
 The sign-in screen also uses the server theme.
@@ -86,7 +87,7 @@ cannot read private console data or change settings by calling its APIs directly
 
 - **Settings:** server name, description, pause/resume invite-based registration,
   connection limits, concurrent API request limits, and message rate/burst limits.
-- **Channels:** view text channels and create new ones.
+- **Channels:** view text channels and create new ones. Names are automatically lowercased, with whitespace converted to dashes.
 - **Invites:** create, view, copy by selecting a code, and revoke unused invites.
 - **Appearance:** open the existing server-wide theme editor.
 

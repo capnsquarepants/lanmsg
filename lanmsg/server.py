@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -39,6 +40,11 @@ class Message(BaseModel):
 
 class Channel(BaseModel):
     name: str = Field(min_length=1, max_length=32, pattern=r"^[a-z0-9_-]+$")
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value):
+        return re.sub(r"\s+", "-", value.strip().lower()) if isinstance(value, str) else value
 
 
 class ProfileUpdate(BaseModel):

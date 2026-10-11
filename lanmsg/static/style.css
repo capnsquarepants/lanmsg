@@ -114,7 +114,10 @@ legend { color: var(--muted); font-size: .8rem; padding: 0 6px; }
 .theme-preview strong { color: var(--nickname); }
 .dialog-actions { display: flex; flex-wrap: wrap; justify-content: end; gap: 8px; margin-top: 18px; }
 #appearance-reset { margin-right: auto; }
-#admin-dialog { width: min(800px, calc(100% - 32px)); }
+#admin-dialog { width: min(800px, calc(100% - 32px)); height: min(800px, calc(100dvh - 32px)); overflow: hidden; }
+#admin-dialog[open] { display: flex; flex-direction: column; }
+#admin-dialog > :not(.admin-content) { flex-shrink: 0; }
+.admin-content { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 0 4px 4px 0; }
 .admin-nav { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--border); padding: 12px 0; margin-bottom: 12px; overflow: visible; }
 .admin-nav button { border-left: 0; }
 .admin-stats { display: flex; flex-wrap: wrap; gap: 16px; color: var(--muted); font-size: .8rem; padding-top: 12px; }
