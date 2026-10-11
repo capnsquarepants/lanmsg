@@ -16,7 +16,7 @@ Install Python 3.11 or newer, then open PowerShell in this repository:
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[desktop,test]"
-.\.venv\Scripts\lanmsg.exe --host 0.0.0.0 --port 8000
+.\.venv\Scripts\python.exe -m lanmsg.server --host 0.0.0.0 --port 8000
 ```
 
 Open http://localhost:8000. Create the first account locally before allowing
@@ -42,6 +42,26 @@ relaunching with a different URL.
 - Live updates, automatic reconnect, and duplicate-safe send retries.
 - Session cookies, salted scrypt passwords, safe plain-text message rendering.
 - Owner channel creation and single-use invites; transient unread indicators.
+- IRC-inspired compact message rows, timestamps, nicknames, and date separators.
+- Server-wide appearance editor with presets, live preview, and persistent CSS tokens.
+
+## Appearance
+
+The server owner can open **Appearance** in the channel sidebar. Adjust colors,
+monospace/system fonts, text size, line height, message row spacing, and corner
+radius. Choose Midnight IRC, Terminal green, or Daylight as a starting palette.
+Changes preview locally while the editor is open. **Cancel** or Escape restores
+the saved theme; **Save for everyone** persists it in SQLite and updates connected
+clients immediately. **Reset to defaults** previews the default palette until saved.
+The sign-in screen also uses the server theme.
+
+Design tokens are declared at the top of `lanmsg/static/style.css`, including
+`--background`, `--sidebar`, `--panel`, `--text`, `--muted`, `--accent`, `--border`,
+`--nickname`, `--font-family`, `--font-size`, `--line-height`, `--row-spacing`,
+and `--corner-radius`. Owners customize these through validated settings rather
+than arbitrary CSS. Saved overrides take precedence over defaults in the CSS
+file. Structural variables such as `--sidebar-width` and `--nickname-width`
+remain available for source-level layout adjustments.
 
 Replies, editing/deletion, Markdown, durable unread positions, account recovery,
 rate limiting, installers, and voice remain follow-up work. This is a development

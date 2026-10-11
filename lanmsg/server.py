@@ -13,6 +13,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .appearance import Appearance
+
 STATIC = Path(__file__).parent / "static"
 
 
@@ -52,6 +54,7 @@ def create_app(database=None):
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, username TEXT UNIQUE COLLATE NOCASE, salt TEXT, password TEXT, owner INTEGER DEFAULT 0);
         CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER REFERENCES users(id), expires REAL);
         CREATE TABLE IF NOT EXISTS invites(token TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY, name TEXT UNIQUE, kind TEXT DEFAULT 'text');
         CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, channel_id INTEGER REFERENCES channels(id), user_id INTEGER REFERENCES users(id), content TEXT, nonce TEXT, created REAL, UNIQUE(user_id, nonce));
         INSERT OR IGNORE INTO channels(id,name) VALUES(1,'general');
@@ -100,6 +103,23 @@ def create_app(database=None):
     def status():
         with db() as conn:
             return {"setup": conn.execute("SELECT count(*) FROM users").fetchone()[0] == 0}
+
+    @app.get("/api/appearance")
+    def appearance():
+        # Design tokens are public so the sign-in screen uses the same theme.
+        with db() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key='appearance'").fetchone()
+        return Appearance.model_validate_json(row["value"]) if row else Appearance()
+
+    @app.put("/api/admin/appearance")
+    async def save_appearance(body: Appearance, request: Request):
+        if not auth(request)["owner"]:
+            raise HTTPException(403)
+        with db() as conn:
+            conn.execute("INSERT INTO settings(key,value) VALUES('appearance',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (body.model_dump_json(),))
+        result = body.model_dump()
+        await broadcast({"type": "appearance", "appearance": result})
+        return result
 
     @app.post("/api/{action}")
     def account(action: str, body: Credentials, request: Request, response: Response):
