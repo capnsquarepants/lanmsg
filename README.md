@@ -62,7 +62,7 @@ the initial display name. Broader profile management remains a follow-up.
 
 ## Appearance
 
-The server owner can open **Appearance** in the channel sidebar. Adjust colors,
+The server owner can open **Admin console → Appearance** in the channel sidebar. Adjust colors,
 monospace/system fonts, text size, line height, message row spacing, and corner
 radius. Choose Midnight IRC, Terminal green, or Daylight as a starting palette.
 Changes preview locally while the editor is open. **Cancel** or Escape restores
@@ -77,6 +77,31 @@ and `--corner-radius`. Owners customize these through validated settings rather
 than arbitrary CSS. Saved overrides take precedence over defaults in the CSS
 file. Structural variables such as `--sidebar-width` and `--nickname-width`
 remain available for source-level layout adjustments.
+
+## Admin console
+
+The first account is the server owner and sees **Admin console** in the sidebar.
+The backend checks owner access for every console operation; ordinary members
+cannot read private console data or change settings by calling its APIs directly.
+
+- **Settings:** server name, description, pause/resume invite-based registration,
+  connection limits, concurrent API request limits, and message rate/burst limits.
+- **Channels:** view text channels and create new ones.
+- **Invites:** create, view, copy by selecting a code, and revoke unused invites.
+- **Appearance:** open the existing server-wide theme editor.
+
+Settings persist in SQLite. Server identity and registration controls apply
+immediately, with identity updates sent to connected clients. Operational limits
+apply when the server next starts; the console shows saved and currently active
+values and a restart notice when they differ. Saving does not restart the process
+or disconnect users. Existing users can still sign in when registration is paused.
+The console does not expose shell execution, file paths, or destructive history
+retention controls.
+
+Command-line connection/request limits provide initial defaults until console
+settings have been saved; saved console limits take precedence on later starts.
+Other deployment controls (listening address, port, HTTPS, database path, retention,
+and process memory limits) remain configured outside the console.
 
 Replies, editing/deletion, Markdown, durable unread positions, account recovery,
 installers, and voice remain follow-up work. This is a development

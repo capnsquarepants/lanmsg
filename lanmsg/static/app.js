@@ -3,6 +3,73 @@ const $ = id => document.getElementById(id);
 let member, channel = 1, channelList = [], registering = false, socket, heartbeat, reconnectTimer;
 let generation = 0, messages = new Map(), pendingSend, loading = false;
 const unread = new Set();
+let savingAdmin = false;
+const LIMIT_LABELS = {connections:'Total connections', connections_per_ip:'Connections per IP', connections_per_session:'Connections per session', http_concurrency:'Concurrent API requests', message_rate:'Messages per second / account', message_burst:'Message burst / account'};
+function receiveServerSettings(settings) {
+  $('server-name').textContent = settings.server_name;
+  $('server-description').textContent = settings.server_description;
+  document.title = settings.server_name + ' · LANmsg';
+  $('toggle-auth').hidden = !settings.registration_enabled;
+  if(!settings.registration_enabled && registering) { registering = false; authMode(); }
+}
+async function loadServerSettings() { receiveServerSettings(await api('/status')); }
+function adminError(error) { $('admin-error').textContent = error.message; }
+function showAdminSettings(data, fill = true) {
+  const form = $('admin-settings-form');
+  if(fill) for(const [key,value] of Object.entries(data.settings)) {
+    const input = form.elements.namedItem(key);
+    if(typeof value === 'boolean') input.checked = value; else input.value = value;
+  }
+  $('admin-restart').textContent = data.restart_required ? 'Saved limits differ from active limits. Restart the server to apply them.' : 'Saved limits are active. Server identity and registration apply immediately.';
+  $('admin-effective').replaceChildren(...Object.entries(data.effective_limits).flatMap(([key,value]) => {
+    const term = document.createElement('dt'), definition = document.createElement('dd');
+    term.textContent = LIMIT_LABELS[key]; definition.textContent = value; return [term,definition];
+  }));
+}
+async function refreshAdmin(fill = true) {
+  const data = await api('/admin/console');
+  showAdminSettings(data, fill);
+  $('admin-stats').replaceChildren(...['users','channels','messages','connections'].map(key => {
+    const item = document.createElement('span'); item.textContent = `${data.stats[key]} ${key}`; return item;
+  }));
+  $('admin-channel-list').replaceChildren(...data.channels.map(channel => {
+    const item = document.createElement('li'); item.textContent = '#' + channel.name; return item;
+  }));
+  $('admin-invite-list').replaceChildren(...data.invites.map(invite => {
+    const item = document.createElement('li'), code = document.createElement('code'), expiry = document.createElement('small'), revoke = document.createElement('button');
+    code.textContent = invite.token; expiry.textContent = 'Expires ' + new Date(invite.expires*1000).toLocaleString();
+    revoke.type = 'button'; revoke.className = 'quiet'; revoke.textContent = 'Revoke';
+    revoke.onclick = async () => { revoke.disabled = true; try { await api('/admin/invites/' + encodeURIComponent(invite.token),{method:'DELETE'}); await refreshAdmin(false); } catch(error) { adminError(error); revoke.disabled = false; } };
+    item.append(code,expiry,revoke); return item;
+  }));
+  if(!data.invites.length) { const item = document.createElement('li'); item.textContent = 'No active invites.'; $('admin-invite-list').append(item); }
+}
+$('admin-open').onclick = async () => {
+  try { await refreshAdmin(); $('admin-error').textContent = ''; $('admin-notice').textContent = ''; $('admin-dialog').showModal(); }
+  catch(error) { showError(error); }
+};
+$('admin-close').onclick = () => { if(!savingAdmin) $('admin-dialog').close(); };
+$('admin-dialog').oncancel = event => { if(savingAdmin) event.preventDefault(); };
+for(const button of document.querySelectorAll('[data-admin-section]')) button.onclick = () => {
+  for(const tab of document.querySelectorAll('[data-admin-section]')) {
+    const active = button === tab; tab.classList.toggle('active',active); tab.setAttribute('aria-pressed',String(active));
+    $('admin-section-' + tab.dataset.adminSection).hidden = !active;
+  }
+};
+$('admin-settings-form').onsubmit = async event => {
+  event.preventDefault(); if(savingAdmin) return;
+  savingAdmin = true; $('admin-save').disabled = true; $('admin-error').textContent = ''; $('admin-notice').textContent = '';
+  const body = {};
+  for(const input of $('admin-settings-form').elements) {
+    if(!input.name) continue;
+    body[input.name] = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value;
+  }
+  try {
+    const result = await api('/admin/settings',{method:'PUT',body:JSON.stringify(body)});
+    showAdminSettings(result); receiveServerSettings(result.settings); $('admin-notice').textContent = 'Settings saved.';
+  } catch(error) { adminError(error); }
+  finally { savingAdmin = false; $('admin-save').disabled = false; }
+};
 const profileUpdates = new Map();
 let savingName = false, viewedUserId = null, userRequest = 0;
 function refreshIdentity() {
@@ -213,12 +280,13 @@ function connect() {
     try {
       profileUpdates.clear(); member = await api('/me');
       if(profileUpdates.has(member.id)) member = {...member, ...profileUpdates.get(member.id)};
-      refreshIdentity(); await loadAppearance(); await select(channel);
+      refreshIdentity(); await loadServerSettings(); await loadAppearance(); await select(channel);
     } catch(error) { showError(error); }
   };
   socket.onmessage = event => {
     const data = JSON.parse(event.data);
     if(data.type === 'profile') receiveProfile(data.profile);
+    if(data.type === 'server_settings') receiveServerSettings(data.settings);
     if(data.type === 'appearance') receiveTheme(data.appearance);
     if(data.type === 'channels') loadChannels().catch(showError);
     if(data.type === 'message') {
@@ -251,10 +319,19 @@ $('composer').onsubmit = async event => {
   finally { $('send').disabled = false; $('content').focus(); }
 };
 $('content').onkeydown = event => { if(event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if(!$('send').disabled) $('composer').requestSubmit(); } };
-$('add-channel').onclick = async () => { const name = prompt('Channel name (lowercase letters, numbers, hyphens or underscores)'); if(!name) return; try { await api('/admin/channels',{method:'POST',body:JSON.stringify({name})}); await loadChannels(); } catch(error) { showError(error); } };
-$('invite-button').onclick = async () => { try { const result = await api('/admin/invites',{method:'POST'}); prompt('Single-use invite code — copy and share with your friend:',result.invite); } catch(error) { showError(error); } };
+$('admin-channel-form').onsubmit = async event => {
+  event.preventDefault(); $('add-channel').disabled = true; $('admin-error').textContent = '';
+  try { await api('/admin/channels',{method:'POST',body:JSON.stringify({name:$('admin-channel-name').value})}); $('admin-channel-name').value = ''; await loadChannels(); await refreshAdmin(false); }
+  catch(error) { adminError(error); } finally { $('add-channel').disabled = false; }
+};
+$('invite-button').onclick = async () => {
+  $('invite-button').disabled = true; $('admin-error').textContent = '';
+  try { await api('/admin/invites',{method:'POST'}); await refreshAdmin(false); $('admin-notice').textContent = 'Invite created. Select the code to copy it.'; }
+  catch(error) { adminError(error); } finally { $('invite-button').disabled = false; }
+};
 $('logout').onclick = async () => { try { await api('/session/logout',{method:'POST'}); socket.onclose = null; socket.close(); clearInterval(heartbeat); clearTimeout(reconnectTimer); location.reload(); } catch(error) { showError(error); } };
 (async () => {
+  try { await loadServerSettings(); } catch { /* Default server identity remains usable. */ }
   try { await loadAppearance(); } catch { /* CSS defaults remain usable if theme loading fails. */ }
   try { member = await api('/me'); await start(); } catch { try { const status = await api('/status'); if(status.setup) { registering = true; authMode(); $('invite-label').hidden = true; $('auth-hint').textContent = 'Create the first account to become the server owner.'; } } catch { $('auth-error').textContent = 'Cannot reach the server.'; } }
 })();

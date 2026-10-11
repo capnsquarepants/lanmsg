@@ -10,8 +10,8 @@
   <button id="submit-auth">Sign in</button><button type="button" class="quiet" id="toggle-auth">Create an account</button><p id="auth-error" role="alert"></p></form>
 </section>
 <main id="chat" hidden>
-  <aside><div class="brand"><span class="brand-mark">#</span><span>LANmsg</span></div><div class="server-label">Your private network</div><p class="section-label">CHANNELS</p><nav id="channels" aria-label="Text channels"></nav>
-    <div id="admin" hidden><button id="add-channel" class="quiet">+ New channel</button><button id="invite-button" class="quiet">Create invite</button><button id="appearance-button" class="quiet">Appearance</button></div>
+  <aside><div class="brand"><span class="brand-mark">#</span><span id="server-name">LANmsg</span></div><div id="server-description" class="server-label">Your private network</div><p class="section-label">CHANNELS</p><nav id="channels" aria-label="Text channels"></nav>
+    <div id="admin" hidden><button id="admin-open" class="quiet">Admin console</button></div>
     <div class="voice"><strong>Voice</strong><p>Planned for a future release</p></div>
     <footer><button id="identity" class="quiet" aria-label="Change your display name"><span id="identity-name"></span><small id="identity-handle"></small></button><button id="logout" class="quiet">Sign out</button></footer>
   </aside>
@@ -22,6 +22,34 @@
     <div class="status-bar"><span id="connection" role="status">Connecting…</span><span id="status-channel">#general</span><span class="composer-hint">Enter to send · Shift+Enter for a new line</span></div>
   </section>
 </main>
+<dialog id="admin-dialog" aria-labelledby="admin-title">
+  <div class="dialog-heading"><div><h2 id="admin-title">Admin console</h2><p>Manage this server · Owner access</p></div><button id="admin-close" type="button" class="quiet" aria-label="Close admin console">✕</button></div>
+  <div id="admin-stats" class="admin-stats"></div>
+  <nav class="admin-nav" aria-label="Admin sections"><button type="button" data-admin-section="settings" class="active" aria-pressed="true">Settings</button><button type="button" data-admin-section="channels" aria-pressed="false">Channels</button><button type="button" data-admin-section="invites" aria-pressed="false">Invites</button><button type="button" data-admin-section="appearance" aria-pressed="false">Appearance</button></nav>
+  <section id="admin-section-settings">
+    <form id="admin-settings-form">
+      <fieldset><legend>Server identity · Applies immediately</legend>
+        <label>Server name<input name="server_name" maxlength="64" required></label>
+        <label>Description<input name="server_description" maxlength="160"></label>
+        <label class="checkbox-label"><input name="registration_enabled" type="checkbox">Allow new accounts with valid invites</label>
+      </fieldset>
+      <fieldset><legend>Connection limits · Requires restart</legend><div class="theme-grid">
+        <label>Total connections<input name="connections" type="number" min="1" max="1000" required></label>
+        <label>Connections per IP<input name="connections_per_ip" type="number" min="1" max="1000" required></label>
+        <label>Connections per session<input name="connections_per_session" type="number" min="1" max="10" required></label>
+        <label>Concurrent API requests<input name="http_concurrency" type="number" min="1" max="128" required></label>
+        <label>Messages per second / account<input name="message_rate" type="number" min="0.001" max="20" step="0.001" required></label>
+        <label>Message burst / account<input name="message_burst" type="number" min="1" max="100" required></label>
+      </div><p class="admin-help">People sharing an internet connection share the per-IP limit. Each browser tab uses a connection.</p></fieldset>
+      <p id="admin-restart" role="status"></p><details><summary>Currently active limits</summary><dl id="admin-effective" class="admin-effective"></dl></details>
+      <div class="dialog-actions"><button id="admin-save">Save settings</button></div>
+    </form>
+  </section>
+  <section id="admin-section-channels" hidden><h3>Text channels</h3><ul id="admin-channel-list" class="admin-list"></ul><form id="admin-channel-form" class="admin-inline-form"><label>Channel name<input id="admin-channel-name" required maxlength="32" pattern="[a-z0-9_-]+" placeholder="e.g. off-topic"></label><button id="add-channel">Create channel</button></form></section>
+  <section id="admin-section-invites" hidden><h3>Invites</h3><p class="admin-help">Single-use codes expire after seven days. Revoking a code prevents it from being used to register.</p><button id="invite-button" type="button">Create invite</button><ul id="admin-invite-list" class="admin-list"></ul></section>
+  <section id="admin-section-appearance" hidden><h3>Server appearance</h3><p>Set colors, typography, and spacing for everyone on this server.</p><button id="appearance-button" type="button">Edit appearance</button></section>
+  <p id="admin-error" role="alert"></p><p id="admin-notice" role="status"></p>
+</dialog>
 <dialog id="display-name-dialog" aria-labelledby="display-name-title">
   <form id="display-name-form">
     <div class="dialog-heading"><div><h2 id="display-name-title">Your display name</h2><p>Choose the name people see in chat.</p></div><button id="display-name-close" type="button" class="quiet" aria-label="Close display name editor">✕</button></div>

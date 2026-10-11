@@ -7,8 +7,10 @@ import secrets
 import shutil
 import sqlite3
 import time
+import threading
 import unicodedata
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
@@ -19,6 +21,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .appearance import Appearance
 from .reliability import AdmissionMiddleware, Hub, Limits, RateLimiter
+from .settings import AppSettings, LIMIT_FIELDS
 
 STATIC = Path(__file__).parent / "static"
 
@@ -92,6 +95,10 @@ def create_app(database=None, limits=None):
         if "expires" not in {row["name"] for row in conn.execute("PRAGMA table_info(invites)")}:
             conn.execute("ALTER TABLE invites ADD COLUMN expires REAL NOT NULL DEFAULT 0")
             conn.execute("UPDATE invites SET expires=?", (time.time() + 7 * 86400,))
+        stored = conn.execute("SELECT value FROM settings WHERE key='app'").fetchone()
+    saved_settings = AppSettings.model_validate_json(stored["value"]) if stored else AppSettings(**{key: getattr(limits, key) for key in LIMIT_FIELDS})
+    limits = replace(limits, **{key: getattr(saved_settings, key) for key in LIMIT_FIELDS})
+    settings_lock = threading.Lock()
 
     limiter = RateLimiter(limits.rate_keys)
 
@@ -157,7 +164,50 @@ def create_app(database=None, limits=None):
     @app.get("/api/status")
     def status():
         with db() as conn:
-            return {"setup": conn.execute("SELECT count(*) FROM users").fetchone()[0] == 0}
+            return {"setup": conn.execute("SELECT count(*) FROM users").fetchone()[0] == 0, **saved_settings.public()}
+
+    def owner(request):
+        member = auth(request)
+        if not member["owner"]:
+            raise HTTPException(403, "Server owner access required")
+        return member
+
+    def settings_response():
+        settings = saved_settings
+        effective = {key: getattr(limits, key) for key in LIMIT_FIELDS}
+        return {"settings": settings.model_dump(), "effective_limits": effective,
+                "restart_required": any(getattr(settings, key) != value for key, value in effective.items())}
+
+    @app.get("/api/admin/console")
+    def console(request: Request):
+        owner(request)
+        with db() as conn:
+            stats = {table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in ("users", "channels", "messages")}
+            channels = [dict(row) for row in conn.execute("SELECT * FROM channels ORDER BY id")]
+            invites = [dict(row) for row in conn.execute("SELECT token,expires FROM invites WHERE expires>? ORDER BY expires DESC", (time.time(),))]
+        stats["connections"] = len(hub.peers)
+        stats["free_disk_bytes"] = shutil.disk_usage(path.parent).free
+        stats["database_bytes"] = path.stat().st_size
+        return {**settings_response(), "stats": stats, "channels": channels, "invites": invites}
+
+    @app.put("/api/admin/settings")
+    def update_settings(body: AppSettings, request: Request):
+        nonlocal saved_settings
+        owner(request)
+        with settings_lock:
+            with db() as conn:
+                conn.execute("INSERT INTO settings(key,value) VALUES('app',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (body.model_dump_json(),))
+            saved_settings = body
+            result = settings_response()
+            hub.publish({"type": "server_settings", "settings": body.public()})
+        return result
+
+    @app.delete("/api/admin/invites/{token}")
+    def revoke_invite(token: str, request: Request):
+        owner(request)
+        with db() as conn:
+            conn.execute("DELETE FROM invites WHERE token=?", (token,))
+        return {"ok": True}
 
     @app.get("/api/appearance")
     def appearance():
@@ -188,6 +238,8 @@ def create_app(database=None, limits=None):
             conn.execute("BEGIN IMMEDIATE")
             if action == "register":
                 owner = conn.execute("SELECT count(*) FROM users").fetchone()[0] == 0
+                if not owner and not saved_settings.registration_enabled:
+                    raise HTTPException(403, "New account registration is paused")
                 if not owner and not conn.execute("SELECT 1 FROM invites WHERE token=? AND expires>?", (body.invite, time.time())).fetchone():
                     raise HTTPException(403, "A valid invite is required")
                 salt = secrets.token_hex(16)
