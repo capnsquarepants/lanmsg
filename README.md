@@ -50,7 +50,9 @@ relaunching with a different URL.
 
 ## Message editing and deletion
 
-Use **Edit** on your own messages to change their text inline. Saved edits show an
+Hover over a message or focus it with the keyboard to reveal the icon toolbar at
+the end of its row. Touch devices keep the controls visible. Use the pencil icon
+on your own messages to change their text inline. Saved edits show an
 edited marker and update connected clients immediately. A version check prevents
 an older editor from overwriting a newer change. The owner cannot edit someone
 else's message.
@@ -62,7 +64,7 @@ Ordinary chat APIs and WebSocket events never include deleted text or prior vers
 even when retrying the original send. Previously received text cannot be removed
 from another person's saved copies.
 
-Only the server owner can use **History** on a message or **Admin console > Message
+Only the server owner can use the history icon on a message or **Admin console > Message
 history** to inspect its current retained text and earlier versions. Versions load
 in pages of 50, newest first. Admin currently means the single server owner; there
 are no delegated admin roles yet. Database access and backups also contain retained
@@ -249,3 +251,5 @@ not total process memory.
 
 The implementation follows the official [FastAPI WebSocket documentation](https://fastapi.tiangolo.com/advanced/websockets/)
 and [pywebview usage guide](https://pywebview.flowrl.com/guide/usage.html).
+
+Message action icons are bundled locally from [Iconoir v7.12.1](https://github.com/iconoir-icons/iconoir/tree/v7.12.1), with its MIT license in `lanmsg/static/icons/LICENSE.iconoir`. Icons work without an internet connection and inherit the server theme.

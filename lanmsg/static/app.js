@@ -277,6 +277,13 @@ async function openMessageHistory(id) {
 function messageAction(label, action) {
   const button = document.createElement('button'); button.type = 'button'; button.className = 'quiet'; button.textContent = label; button.onclick = action; return button;
 }
+function messageIcon(label, icon, action) {
+  const button = messageAction(label, action);
+  button.textContent = ''; button.title = label; button.setAttribute('aria-label', label);
+  const glyph = document.createElement('span'); glyph.className = 'message-icon';
+  glyph.setAttribute('aria-hidden', 'true'); glyph.style.setProperty('--icon', `url('/static/icons/${icon}.svg')`);
+  button.append(glyph); return button;
+}
 async function saveMessageEdit(id) {
   if(savingMessage) return;
   savingMessage = true; $('chat-error').textContent = ''; render();
@@ -319,13 +326,14 @@ function render() {
       const marker = document.createElement('small'); marker.className = 'edited-marker'; marker.textContent = ' (edited)'; marker.title = new Date(m.edited*1000).toLocaleString(); body.append(marker);
     }
     const actions = document.createElement('div'); actions.className = 'message-actions';
-    if(!m.deleted && m.user_id === member?.id) actions.append(messageAction('Edit', () => {
+    actions.setAttribute('role', 'group'); actions.setAttribute('aria-label', 'Message actions');
+    if(!m.deleted && m.user_id === member?.id) actions.append(messageIcon('Edit message', 'edit-pencil', () => {
       if(savingMessage) return;
       editingMessage = m.id; editDraft = m.content; editVersion = m.version; render();
       $('message-edit-' + m.id)?.focus();
     }));
-    if(!m.deleted && (m.user_id === member?.id || member?.owner)) actions.append(messageAction('Delete', () => deleteMessage(m.id)));
-    if(member?.owner) actions.append(messageAction('History', () => openMessageHistory(m.id)));
+    if(!m.deleted && (m.user_id === member?.id || member?.owner)) actions.append(messageIcon('Delete message', 'trash', () => deleteMessage(m.id)));
+    if(member?.owner) actions.append(messageIcon('View message history', 'clock-rotate-right', () => openMessageHistory(m.id)));
     if(editingMessage === m.id && !m.deleted) {
       body.replaceChildren();
       const input = document.createElement('textarea'); input.id = 'message-edit-' + m.id; input.value = editDraft; input.maxLength = 4000; input.disabled = savingMessage; input.setAttribute('aria-label','Edit message');
@@ -334,8 +342,12 @@ function render() {
       save.disabled = cancel.disabled = savingMessage;
       body.append(input,save,cancel);
     }
-    if(actions.childElementCount) body.append(actions);
-    item.append(date,name,body); rows.push(item);
+    item.append(date,name,body);
+    if(actions.childElementCount) {
+      item.style.setProperty('--message-action-width', (actions.childElementCount * 28 + 12) + 'px');
+      item.append(actions);
+    }
+    rows.push(item);
   }
   $('message-list').replaceChildren(...rows);
   $('empty').hidden = messages.size > 0;

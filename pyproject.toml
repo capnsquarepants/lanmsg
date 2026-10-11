@@ -19,7 +19,7 @@ lanmsg-desktop = "lanmsg.desktop:main"
 lanmsg-backup = "lanmsg.backup:main"
 
 [tool.setuptools.package-data]
-lanmsg = ["static/*"]
+lanmsg = ["static/*", "static/icons/*"]
 
 [tool.setuptools.packages.find]
 include = ["lanmsg*"]
