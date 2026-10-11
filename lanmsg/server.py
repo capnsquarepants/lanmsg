@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from .appearance import Appearance
+from .previews import PreviewError, PreviewService
 from .reliability import AdmissionMiddleware, Hub, Limits, RateLimiter
 from .settings import AppSettings, LIMIT_FIELDS
 
@@ -37,6 +38,11 @@ class Credentials(BaseModel):
 class Message(BaseModel):
     content: str = Field(min_length=1, max_length=4000)
     nonce: str = Field(min_length=1, max_length=64)
+
+
+class PreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    url: str = Field(min_length=1, max_length=2048)
 
 
 class MessageEdit(BaseModel):
@@ -146,6 +152,8 @@ def create_app(database=None, limits=None):
     message_lock = threading.Lock()
 
     limiter = RateLimiter(limits.rate_keys)
+    preview_service = PreviewService()
+    preview_waiters = threading.BoundedSemaphore(max(1, min(4, limits.http_concurrency // 4)))
 
     def cleanup():
         with db() as conn:
@@ -174,8 +182,10 @@ def create_app(database=None, limits=None):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             await hub.close()
+            preview_service.close()
 
     app = FastAPI(title="LANmsg", lifespan=lifespan)
+    app.state.preview_service = preview_service
     app.add_middleware(AdmissionMiddleware, limits=limits, limiter=limiter)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -191,7 +201,7 @@ def create_app(database=None, limits=None):
         if request.method != "GET" and request.headers.get("x-lanmsg") != "1":
             raise HTTPException(403, "Invalid request origin")
         member = user(request.cookies.get("session"))
-        if request.method != "GET":
+        if request.method != "GET" and request.url.path != "/api/previews":
             message = request.url.path.endswith("/messages")
             rate, burst = (limits.message_rate, limits.message_burst) if message else (limits.write_rate, limits.write_burst)
             if not limiter.allow(("message" if message else "write", member["id"]), rate, burst):
@@ -271,10 +281,10 @@ def create_app(database=None, limits=None):
         hub.publish({"type": "appearance", "appearance": result})
         return result
 
-    @app.post("/api/{action}")
-    def account(action: str, body: Credentials, request: Request, response: Response):
-        if action not in ("register", "login"):
-            raise HTTPException(404)
+    @app.post("/api/register")
+    @app.post("/api/login")
+    def account(body: Credentials, request: Request, response: Response):
+        action = request.url.path.rsplit("/", 1)[-1]
         if request.headers.get("x-lanmsg") != "1":
             raise HTTPException(403)
         if shutil.disk_usage(path.parent).free < limits.minimum_free_bytes:
@@ -353,6 +363,25 @@ def create_app(database=None, limits=None):
         auth(request)
         with db() as conn:
             return profile_row(conn, user_id)
+
+    @app.post("/api/previews")
+    def link_preview(body: PreviewRequest, request: Request, response: Response):
+        member = auth(request)
+        with db() as conn:
+            override = conn.execute("SELECT media_preview_override FROM users WHERE id=?", (member["id"],)).fetchone()[0]
+        if not (saved_settings.media_previews if override is None else bool(override)):
+            raise HTTPException(403, "Previews are disabled for your account")
+        if not limiter.allow(("preview", member["id"]), 2, 6):
+            raise HTTPException(429, "Too many preview requests; retry shortly", headers={"Retry-After":"1"})
+        response.headers["Cache-Control"] = "private, no-store"
+        if not preview_waiters.acquire(blocking=False):
+            raise HTTPException(503, "Preview service is busy; retry later", headers={"Retry-After":"1"})
+        try:
+            return preview_service.get(body.url)
+        except PreviewError as error:
+            raise HTTPException(error.status, str(error)) from None
+        finally:
+            preview_waiters.release()
 
     @app.get("/api/users/{user_id}")
     def get_profile(user_id: int, request: Request):

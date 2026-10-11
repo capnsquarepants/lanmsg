@@ -90,6 +90,7 @@ let savingName = false, viewedUserId = null, userRequest = 0;
 let mediaPreviewsEnabled = false;
 function updateMediaPreference(preference) {
   const enabled = MediaPreviews.enabled(preference, serverMediaPreviews);
+  MediaPreviews.setEnabled(enabled);
   if(member) member.media_previews = preference;
   if(enabled !== mediaPreviewsEnabled) { mediaPreviewsEnabled = enabled; if(member) render(); }
 }

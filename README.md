@@ -95,11 +95,37 @@ messages and the inline editor do not load previews. Videos do not autoplay, dir
 video downloads wait for playback, and images/YouTube frames load lazily. YouTube
 uses its [privacy-enhanced embed player](https://support.google.com/youtube/answer/171780).
 Previews load directly from the linked site in the viewer's browser; the server
-never downloads media or performs URL metadata lookups. HTTPS clients omit insecure
+never downloads the image/video files themselves. Webpage metadata is fetched
+by the server only for enabled viewers, as described below. HTTPS clients omit insecure
 HTTP previews. Unsupported or unavailable media can still be opened using its link.
-Upload hosting, generic website cards, and other provider embeds are not implemented.
+Upload hosting and other provider embeds are not implemented.
 Changing a preference or the server default updates displayed previews immediately.
 Existing media players are preserved when unrelated messages arrive.
+
+URL cards use [Open Graph metadata](https://ogp.me/) for titles, descriptions, site
+names, and optional thumbnails, with HTML title/description fallbacks. The same
+preview preference controls them. Cards load near the visible area, share the
+three-preview limit with media, and fall back to a clickable link when unavailable.
+Opting out prevents new metadata requests and cancels pending client requests.
+Requests that already reached the server may finish, but their results are not shown.
+
+The authenticated metadata API also enforces the requesting account's effective
+preference before serving a cached result. It sends no browser cookies, credentials,
+or session headers to remote sites. It blocks private/local/special IP addresses,
+nonstandard ports, unsafe URL schemes, and credentials in URLs. DNS answers are
+validated and the chosen numeric address is pinned to the connection; redirects
+are revalidated (at most three). HTTPS uses certificate and hostname verification.
+Optional thumbnails are checked for public DNS and then loaded directly by the browser.
+
+Fetches use a five-second network deadline and a six-second response deadline,
+a 512 KiB HTML limit, two fetch workers, and bounded request admission. Unusually
+slow system DNS can outlive the response deadline but still holds a worker slot,
+so no extra workers or unbounded queue are created. No JavaScript is executed,
+compressed HTML is rejected, and the in-memory cache holds at most 256 URLs for
+ten minutes (failed fetches for one minute). Cache entries expire on restart.
+Private LAN websites intentionally remain plain links, while public websites can
+show cards. Pages requiring login, blocking automated requests, or generating
+metadata only with JavaScript may not preview.
 
 Names can contain spaces and visible Unicode characters and need not be unique.
 The unique account username remains your sign-in handle. Click a nickname in chat
@@ -283,4 +309,4 @@ and [pywebview usage guide](https://pywebview.flowrl.com/guide/usage.html).
 
 Message action icons are bundled locally from [Iconoir v7.12.1](https://github.com/iconoir-icons/iconoir/tree/v7.12.1), with its MIT license in `lanmsg/static/icons/LICENSE.iconoir`. Icons work without an internet connection and inherit the server theme.
 
-Preview UI checks: `node tests/media.cjs`. The Python suite checks persistence, migration, owner permissions, and private user overrides.
+Preview UI checks: `node tests/media.cjs` and `node tests/link_previews.cjs`. The Python suite checks persistence, migration, owner permissions, and private user overrides.
