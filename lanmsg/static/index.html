@@ -25,9 +25,9 @@
 </main>
 <dialog id="mentions-dialog" aria-labelledby="mentions-title"><div class="dialog-heading"><h2 id="mentions-title">Mentions inbox</h2><button id="mentions-close" type="button" class="quiet" aria-label="Close mentions inbox">Close</button></div><label class="checkbox-label"><input id="mentions-unread-only" type="checkbox" checked>Unread only</label><div id="mentions-results"></div><button id="mentions-more" class="quiet" hidden>Load earlier mentions</button><p id="mentions-error" role="alert"></p></dialog>
 <dialog id="admin-dialog" aria-labelledby="admin-title">
-  <div class="dialog-heading"><div><h2 id="admin-title">Admin console</h2><p>Manage this server · Owner access</p></div><button id="admin-close" type="button" class="quiet" aria-label="Close admin console">✕</button></div>
+  <div class="dialog-heading"><div><h2 id="admin-title">Admin console</h2><p>Manage this server · Administrator access</p></div><button id="admin-close" type="button" class="quiet" aria-label="Close admin console">✕</button></div>
   <div id="admin-stats" class="admin-stats"></div>
-  <nav class="admin-nav" aria-label="Admin sections"><button type="button" data-admin-section="settings" class="active" aria-pressed="true">Settings</button><button type="button" data-admin-section="channels" aria-pressed="false">Channels</button><button type="button" data-admin-section="invites" aria-pressed="false">Invites</button><button type="button" data-admin-section="appearance" aria-pressed="false">Appearance</button><button type="button" data-admin-section="history" aria-pressed="false">Message history</button></nav>
+  <nav class="admin-nav" aria-label="Admin sections"><button type="button" data-admin-section="settings" class="active" aria-pressed="true">Settings</button><button type="button" data-admin-section="channels" aria-pressed="false">Channels</button><button type="button" data-admin-section="invites" aria-pressed="false">Invites</button><button type="button" data-admin-section="appearance" aria-pressed="false">Appearance</button><button type="button" data-admin-section="members" aria-pressed="false">Members</button><button type="button" data-admin-section="audit" aria-pressed="false">Audit log</button><button type="button" data-admin-section="history" aria-pressed="false">Message history</button></nav>
   <div id="admin-content" class="admin-content">
   <section id="admin-section-settings">
     <form id="admin-settings-form">
@@ -51,8 +51,10 @@
   </section>
   <section id="admin-section-channels" hidden><h3>Text channels</h3><ul id="admin-channel-list" class="admin-list"></ul><form id="admin-channel-form" class="admin-inline-form"><label>Channel name<input id="admin-channel-name" required maxlength="32" pattern="[a-z0-9_-]+" placeholder="e.g. off-topic"></label><button id="add-channel">Create channel</button></form></section>
   <section id="admin-section-invites" hidden><h3>Invites</h3><p class="admin-help">Single-use codes expire after seven days. Revoking a code prevents it from being used to register.</p><button id="invite-button" type="button">Create invite</button><ul id="admin-invite-list" class="admin-list"></ul></section>
+  <section id="admin-section-members" hidden><h3>Members and bans</h3><p class="admin-help">Only the owner grants admin access. Admins can moderate ordinary members. Bans revoke active sessions; unbanning requires a fresh sign-in.</p><button id="members-refresh" type="button" class="quiet">Refresh members</button><label>Ban reason<input id="ban-reason" maxlength="300" placeholder="Optional reason, visible to admins"></label><div id="admin-members"></div></section>
+  <section id="admin-section-audit" hidden><h3>Audit log</h3><p class="admin-help">Administrative actions, bans, role changes, and message deletions. Message content and invite codes are omitted.</p><button id="audit-refresh" type="button" class="quiet">Refresh audit log</button><div id="audit-results"></div><button id="audit-more" type="button" class="quiet" hidden>Earlier entries</button></section>
   <section id="admin-section-history" hidden>
-    <h3>Message history</h3><p class="admin-help">Owner only. Retained versions and deleted text are never included in ordinary chat responses.</p>
+    <h3>Message history</h3><p class="admin-help">Administrators only. Retained versions and deleted text are never included in ordinary chat responses.</p>
     <form id="message-history-form" class="admin-inline-form"><label>Message ID<input id="message-history-id" type="number" min="1" step="1" required></label><button>View history</button></form>
     <div id="message-history-results"></div>
   </section>

@@ -181,6 +181,8 @@ function selectAdminSection(section) {
     tab.classList.toggle('active',active); tab.setAttribute('aria-pressed',String(active));
     $('admin-section-' + tab.dataset.adminSection).hidden = !active;
   }
+  if(section === 'members') refreshMembers().catch(error => adminError(error,'members'));
+  if(section === 'audit') loadAudit();
   if(section === 'appearance') { editingTheme = true; fillThemeForm(savedTheme); $('theme-preset').value = 'custom'; }
   $('admin-content').scrollTop = 0;
 }
@@ -382,6 +384,7 @@ $('appearance-form').onsubmit = async event => {
 async function api(path, options = {}) {
   const response = await fetch('/api' + path, {cache:'no-store', ...options, headers: {'Content-Type':'application/json', 'X-LANmsg':'1'}});
   const data = await response.json();
+  if(response.status === 401 && member) endSession();
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Check the supplied fields.');
   return data;
 }
@@ -414,6 +417,67 @@ function drawChannels() {
   }));
 }
 function showError(error) { $('chat-error').textContent = error.message; }
+function endSession() {
+  member = null; clearInterval(heartbeat); clearTimeout(reconnectTimer); clearTimeout(viewportTimer); clearTimeout(readRefreshTimer);
+  if(socket) { socket.onclose = null; socket.close(); }
+  for(const alert of desktopAlerts.values()) alert.close(); desktopAlerts.clear();
+  for(const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
+  messages.clear(); readStates.clear(); messageRows.clear(); $('message-list').replaceChildren();
+  MediaPreviews.setEnabled(false); $('chat').hidden = true; $('auth').hidden = false;
+  registering = false; authMode(); $('auth-error').textContent = 'Your session ended. Sign in again, or contact the server owner if your account was banned.';
+}
+function refreshAdminAccess() {
+  const allowed = member && (member.owner || member.admin); $('admin').hidden = !allowed;
+  if(!allowed && $('admin-dialog').open) $('admin-dialog').close();
+}
+let auditCursor = null, auditRequest = 0, membersRequest = 0;
+async function refreshMembers() {
+  const request = ++membersRequest, users = await api('/admin/members');
+  if(request !== membersRequest || !member || !(member.owner || member.admin)) return;
+  $('admin-members').replaceChildren(...users.map(user => {
+    const item = document.createElement('article'), name = document.createElement('p'), actions = document.createElement('div');
+    name.textContent = (user.display_name || user.username) + ' (@' + user.username + ') / ' + (user.owner ? 'Owner' : user.admin ? 'Admin' : 'Member') + (user.banned ? ' / Banned' : '');
+    actions.className = 'moderation-actions';
+    const mutate = async (button,path,body) => {
+      button.disabled = true; clearAdminFeedback();
+      try { await api(path,{method:'PUT',body:JSON.stringify(body)}); await refreshMembers(); adminNotice('Member updated.','members'); }
+      catch(error) { adminError(error,'members'); button.disabled = false; }
+    };
+    if(!user.owner && member.owner) {
+      const role = messageAction(user.admin ? 'Remove admin' : 'Make admin',() => {
+        if(!confirm((user.admin ? 'Remove admin access from @' : 'Grant admin access to @') + user.username + '?')) return;
+        mutate(role,'/admin/members/' + user.id + '/role',{admin:!user.admin});
+      }); role.disabled = !!user.banned && !user.admin; actions.append(role);
+    }
+    if(!user.owner && user.id !== member.id && (member.owner || !user.admin)) {
+      const ban = messageAction(user.banned ? 'Unban' : 'Ban',() => {
+        if(!confirm((user.banned ? 'Unban @' : 'Ban @') + user.username + (user.banned ? '?' : ' and end their active sessions?'))) return;
+        mutate(ban,'/admin/members/' + user.id + '/ban',{banned:!user.banned,reason:$('ban-reason').value});
+      }); actions.append(ban);
+    }
+    item.append(name);
+    if(user.banned && user.ban_reason) { const reason = document.createElement('p'); reason.textContent = user.ban_reason; item.append(reason); }
+    item.append(actions); return item;
+  }));
+}
+async function loadAudit(before = null) {
+  const request = ++auditRequest; if(before === null) $('audit-results').replaceChildren(); $('audit-more').disabled = true;
+  try {
+    const data = await api('/admin/audit' + (before === null ? '' : '?before=' + before));
+    if(request !== auditRequest || activeAdminSection !== 'audit' || !$('admin-dialog').open) return;
+    for(const entry of data.entries) {
+      const item = document.createElement('article'), heading = document.createElement('p'), detail = document.createElement('p');
+      heading.textContent = new Date(entry.created*1000).toLocaleString() + ' / @' + entry.actor_username + ' / ' + entry.action + (entry.target_id === null ? '' : ' / ' + (entry.target_username ? '@' + entry.target_username : '#' + entry.target_id));
+      detail.textContent = entry.detail; item.append(heading,detail); $('audit-results').append(item);
+    }
+    if(!data.entries.length && before === null) $('audit-results').textContent = 'No recorded actions yet.';
+    auditCursor = data.next_before; $('audit-more').hidden = auditCursor === null;
+  } catch(error) { if(request === auditRequest) adminError(error,'audit'); }
+  finally { if(request === auditRequest) $('audit-more').disabled = false; }
+}
+$('members-refresh').onclick = () => refreshMembers().catch(error => adminError(error,'members'));
+$('audit-refresh').onclick = () => loadAudit();
+$('audit-more').onclick = () => loadAudit(auditCursor);
 function mergeMessage(message) {
   const previous = messages.get(message.id);
   if(!previous || (message.version || 1) >= (previous.version || 1)) messages.set(message.id, message);
@@ -476,7 +540,7 @@ async function saveMessageEdit(id) {
   finally { savingMessage = false; render(); }
 }
 async function deleteMessage(id) {
-  if(!confirm('Delete this message? Its content will remain available to the server owner.')) return;
+  if(!confirm('Delete this message? Its content will remain available to server administrators.')) return;
   try {
     const updated = await api('/messages/' + id,{method:'DELETE'});
     if(updated.channel_id === channel) mergeMessage(updated);
@@ -498,7 +562,7 @@ function render() {
     }
     if(!divided && readBoundary !== null && m.id > readBoundary && !m.deleted && m.user_id !== member?.id) { rows.push(unreadDivider); divided = true; }
     const profile = {...m, ...profileUpdates.get(m.user_id)}, displayName = profile.display_name || profile.username;
-    const signature = JSON.stringify([m.version, m.content, m.deleted, m.edited, profile.display_name, profile.username, profile.nickname_color, mediaPreviewsEnabled, member?.owner, m.mentions]);
+    const signature = JSON.stringify([m.version, m.content, m.deleted, m.edited, profile.display_name, profile.username, profile.nickname_color, mediaPreviewsEnabled, member?.owner, member?.admin, m.mentions]);
     const cached = messageRows.get(m.id);
     if(editingMessage !== m.id && cached?.signature === signature) { rows.push(cached.item); continue; }
     const item = document.createElement('article'); item.className = 'message' + (m.user_id === member?.id ? ' self' : '');
@@ -522,8 +586,8 @@ function render() {
       editingMessage = m.id; editDraft = m.content; editVersion = m.version; render();
       $('message-edit-' + m.id)?.focus();
     }));
-    if(!m.deleted && (m.user_id === member?.id || member?.owner)) actions.append(messageIcon('Delete message', 'trash', () => deleteMessage(m.id)));
-    if(member?.owner) actions.append(messageIcon('View message history', 'clock-rotate-right', () => openMessageHistory(m.id)));
+    if(!m.deleted && (m.user_id === member?.id || member?.owner || member?.admin)) actions.append(messageIcon('Delete message', 'trash', () => deleteMessage(m.id)));
+    if(member?.owner || member?.admin) actions.append(messageIcon('View message history', 'clock-rotate-right', () => openMessageHistory(m.id)));
     if(editingMessage === m.id && !m.deleted) {
       body.replaceChildren();
       const input = document.createElement('textarea'); input.id = 'message-edit-' + m.id; input.value = editDraft; input.maxLength = 4000; input.disabled = savingMessage; input.setAttribute('aria-label','Edit message');
@@ -601,7 +665,7 @@ function connect() {
       profileUpdates.clear(); member = {...await api('/me'), ...await api('/me/profile')};
       updateMediaPreference(member.media_previews);
       if(profileUpdates.has(member.id)) member = {...member, ...profileUpdates.get(member.id)};
-      refreshIdentity(); await loadServerSettings(); await loadAppearance(); await select(channel);
+      refreshIdentity(); refreshAdminAccess(); await loadServerSettings(); await loadAppearance(); await select(channel);
     } catch(error) { showError(error); }
   };
   socket.onmessage = event => {
@@ -612,6 +676,11 @@ function connect() {
     }
     if(data.type === 'server_settings') receiveServerSettings(data.settings);
     if(data.type === 'appearance') receiveTheme(data.appearance);
+    if(data.type === 'permissions') {
+      api('/users').then(users => { directory = users; }).catch(showError);
+      if(data.user_id === member?.id) api('/me').then(profile => { member = {...member,...profile}; refreshAdminAccess(); render(); }).catch(showError);
+      if($('admin-dialog').open && activeAdminSection === 'members') refreshMembers().catch(error => adminError(error,'members'));
+    }
     if(data.type === 'reads' && data.user_id === member?.id) { scheduleReadRefresh(); if($('mentions-dialog').open) loadMentions(); }
     if(data.type === 'channels') loadChannels().catch(showError);
     if(data.type === 'message_update') {
@@ -626,11 +695,11 @@ function connect() {
       else { scheduleReadRefresh(); if(m.channel_id === channel) { hasNewer = true; $('newer').hidden = false; } }
     }
   };
-  socket.onclose = () => { clearInterval(heartbeat); $('connection').textContent = 'Reconnecting…'; $('connection').dataset.state = 'offline'; reconnectTimer = setTimeout(connect,2000); };
+  socket.onclose = () => { if(!member) return; api('/me').catch(() => {}); clearInterval(heartbeat); $('connection').textContent = 'Reconnecting…'; $('connection').dataset.state = 'offline'; reconnectTimer = setTimeout(connect,2000); };
 }
 async function start() {
   const profile = await api('/me/profile'); member = {...member, ...profile}; updateMediaPreference(profile.media_previews);
-  $('auth').hidden = true; $('chat').hidden = false; $('admin').hidden = !member.owner;
+  $('auth').hidden = true; $('chat').hidden = false; $('admin').hidden = !(member.owner || member.admin);
   refreshIdentity();
   directory = await api('/users'); seenEvents.clear();
   await loadChannels();

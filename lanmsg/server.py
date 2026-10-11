@@ -69,6 +69,25 @@ class ReadPosition(BaseModel):
     message_id: int = Field(ge=0)
 
 
+class AdminRole(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    admin: bool
+
+
+class BanUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    banned: bool
+    reason: str = Field(default="", max_length=300)
+
+    @field_validator("reason")
+    @classmethod
+    def clean_reason(cls, value):
+        value = value.strip()
+        if any(unicodedata.category(char).startswith("C") for char in value):
+            raise ValueError("Use a reason without control characters")
+        return value
+
+
 class Channel(BaseModel):
     name: str = Field(min_length=1, max_length=32, pattern=r"^[a-z0-9_-]+$")
 
@@ -146,7 +165,7 @@ def create_app(database=None, limits=None):
             conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
         conn.execute("UPDATE users SET display_name=username WHERE display_name=''")
         user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
-        for column, declaration in (("notifications", "TEXT NOT NULL DEFAULT 'mentions'"), ("desktop_notifications", "INTEGER NOT NULL DEFAULT 0"), ("bio", "TEXT NOT NULL DEFAULT ''"), ("nickname_color", "TEXT NOT NULL DEFAULT 'default'"), ("media_previews", "INTEGER NOT NULL DEFAULT 0")):
+        for column, declaration in (("admin", "INTEGER NOT NULL DEFAULT 0"), ("banned", "INTEGER NOT NULL DEFAULT 0"), ("ban_reason", "TEXT NOT NULL DEFAULT ''"), ("notifications", "TEXT NOT NULL DEFAULT 'mentions'"), ("desktop_notifications", "INTEGER NOT NULL DEFAULT 0"), ("bio", "TEXT NOT NULL DEFAULT ''"), ("nickname_color", "TEXT NOT NULL DEFAULT 'default'"), ("media_previews", "INTEGER NOT NULL DEFAULT 0")):
             if column not in user_columns:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {column} {declaration}")
         if "media_preview_override" not in user_columns:
@@ -178,6 +197,10 @@ def create_app(database=None, limits=None):
         CREATE INDEX IF NOT EXISTS mentions_by_user ON message_mentions(user_id,message_id);
         CREATE TABLE IF NOT EXISTS message_sequence(id INTEGER PRIMARY KEY CHECK(id=1),value INTEGER NOT NULL);
         INSERT OR IGNORE INTO message_sequence VALUES(1,(SELECT coalesce(max(id),0) FROM messages));
+        CREATE TABLE IF NOT EXISTS audit_log(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,created REAL NOT NULL,
+            actor_id INTEGER REFERENCES users(id),action TEXT NOT NULL,
+            target_id INTEGER,detail TEXT NOT NULL DEFAULT '');
         """)
         if "read_start_id" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN read_start_id INTEGER NOT NULL DEFAULT 0")
@@ -234,7 +257,7 @@ def create_app(database=None, limits=None):
 
     def user(token):
         with db() as conn:
-            row = conn.execute("SELECT users.id,username,display_name,owner FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?", (token or "", time.time())).fetchone()
+            row = conn.execute("SELECT users.id,username,display_name,owner,admin FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>? AND users.banned=0", (token or "", time.time())).fetchone()
         if not row:
             raise HTTPException(401, "Please sign in")
         return dict(row)
@@ -271,6 +294,27 @@ def create_app(database=None, limits=None):
             raise HTTPException(403, "Server owner access required")
         return member
 
+    def admin(request):
+        member = auth(request)
+        if not (member["owner"] or member["admin"]):
+            raise HTTPException(403, "Administrator access required")
+        return member
+
+    def require_admin(conn, member, owner_only=False):
+        # Recheck inside the write transaction: a concurrent demotion cannot race a mutation.
+        row = require_active(conn, member)
+        if not (row["owner"] or (row["admin"] and not owner_only)):
+            raise HTTPException(403, "Server owner access required" if owner_only else "Administrator access required")
+
+    def require_active(conn, member):
+        row = conn.execute("SELECT owner,admin,banned FROM users WHERE id=?", (member["id"],)).fetchone()
+        if not row or row["banned"]:
+            raise HTTPException(401, "Please sign in")
+        return row
+
+    def audit(conn, member, action, target_id=None, detail=""):
+        conn.execute("INSERT INTO audit_log(created,actor_id,action,target_id,detail) VALUES(?,?,?,?,?)", (time.time(), member["id"], action, target_id, detail))
+
     def settings_response():
         settings = saved_settings
         effective = {key: getattr(limits, key) for key in LIMIT_FIELDS}
@@ -279,7 +323,7 @@ def create_app(database=None, limits=None):
 
     @app.get("/api/admin/console")
     def console(request: Request):
-        owner(request)
+        admin(request)
         with db() as conn:
             stats = {table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in ("users", "channels", "messages")}
             channels = [dict(row) for row in conn.execute("SELECT * FROM channels ORDER BY id")]
@@ -292,10 +336,15 @@ def create_app(database=None, limits=None):
     @app.put("/api/admin/settings")
     def update_settings(body: AppSettings, request: Request):
         nonlocal saved_settings
-        owner(request)
+        member = admin(request)
         with settings_lock:
             with db() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                require_admin(conn, member)
+                changed = sorted(key for key, value in body.model_dump().items() if value != saved_settings.model_dump()[key])
                 conn.execute("INSERT INTO settings(key,value) VALUES('app',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (body.model_dump_json(),))
+                if changed:
+                    audit(conn, member, "settings.update", detail=", ".join(changed))
             saved_settings = body
             result = settings_response()
             hub.publish({"type": "server_settings", "settings": body.public()})
@@ -303,10 +352,74 @@ def create_app(database=None, limits=None):
 
     @app.delete("/api/admin/invites/{token}")
     def revoke_invite(token: str, request: Request):
-        owner(request)
+        member = admin(request)
         with db() as conn:
-            conn.execute("DELETE FROM invites WHERE token=?", (token,))
+            conn.execute("BEGIN IMMEDIATE")
+            require_admin(conn, member)
+            if conn.execute("DELETE FROM invites WHERE token=?", (token,)).rowcount:
+                audit(conn, member, "invite.revoke")
         return {"ok": True}
+
+    @app.get("/api/admin/members")
+    def moderation_members(request: Request):
+        admin(request)
+        with db() as conn:
+            return [dict(row) for row in conn.execute("SELECT id,username,display_name,owner,admin,banned,ban_reason FROM users ORDER BY owner DESC,admin DESC,username COLLATE NOCASE")]
+
+    @app.put("/api/admin/members/{user_id}/role")
+    def change_admin(user_id: int, body: AdminRole, request: Request):
+        member = owner(request)
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_admin(conn, member, owner_only=True)
+            target = conn.execute("SELECT id,owner,admin,banned FROM users WHERE id=?", (user_id,)).fetchone()
+            if not target:
+                raise HTTPException(404, "User not found")
+            if target["owner"]:
+                raise HTTPException(403, "The owner's role cannot be changed")
+            if body.admin and target["banned"]:
+                raise HTTPException(409, "Unban this account before granting admin access")
+            if bool(target["admin"]) != body.admin:
+                conn.execute("UPDATE users SET admin=? WHERE id=?", (body.admin, user_id))
+                audit(conn, member, "admin.grant" if body.admin else "admin.revoke", user_id)
+        hub.publish({"type": "permissions", "user_id": user_id})
+        return {"ok": True}
+
+    @app.put("/api/admin/members/{user_id}/ban")
+    def change_ban(user_id: int, body: BanUpdate, request: Request):
+        member = admin(request)
+        tokens = []
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_admin(conn, member)
+            target = conn.execute("SELECT id,owner,admin,banned FROM users WHERE id=?", (user_id,)).fetchone()
+            if not target:
+                raise HTTPException(404, "User not found")
+            if target["owner"] or target["id"] == member["id"]:
+                raise HTTPException(403, "You cannot ban yourself or the server owner")
+            actor = require_active(conn, member)
+            if target["admin"] and not actor["owner"]:
+                raise HTTPException(403, "Only the owner can moderate another admin")
+            if bool(target["banned"]) != body.banned:
+                conn.execute("UPDATE users SET banned=?,ban_reason=? WHERE id=?", (body.banned, body.reason if body.banned else "", user_id))
+                audit(conn, member, "member.ban" if body.banned else "member.unban", user_id, body.reason)
+            if body.banned:
+                tokens = [row[0] for row in conn.execute("SELECT token FROM sessions WHERE user_id=?", (user_id,))]
+                conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        for token in tokens:
+            hub.revoke(token)
+        hub.publish({"type": "permissions", "user_id": user_id})
+        return {"ok": True}
+
+    @app.get("/api/admin/audit")
+    def audit_history(request: Request, before: int = 9223372036854775807):
+        admin(request)
+        with db() as conn:
+            rows = [dict(row) for row in conn.execute("""SELECT a.*,u.username AS actor_username,t.username AS target_username
+                FROM audit_log a LEFT JOIN users u ON u.id=a.actor_id
+                LEFT JOIN users t ON t.id=a.target_id AND a.action IN ('admin.grant','admin.revoke','member.ban','member.unban')
+                WHERE a.id<? ORDER BY a.id DESC LIMIT 51""", (before,))]
+        return {"entries": rows[:50], "next_before": rows[49]["id"] if len(rows) > 50 else None}
 
     @app.get("/api/appearance")
     def appearance():
@@ -317,10 +430,12 @@ def create_app(database=None, limits=None):
 
     @app.put("/api/admin/appearance")
     def save_appearance(body: Appearance, request: Request):
-        if not auth(request)["owner"]:
-            raise HTTPException(403)
+        member = admin(request)
         with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_admin(conn, member)
             conn.execute("INSERT INTO settings(key,value) VALUES('appearance',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (body.model_dump_json(),))
+            audit(conn, member, "appearance.update")
         result = body.model_dump()
         hub.publish({"type": "appearance", "appearance": result})
         return result
@@ -351,11 +466,13 @@ def create_app(database=None, limits=None):
             row = conn.execute("SELECT * FROM users WHERE username=?", (body.username,)).fetchone()
             if not row or not hmac.compare_digest(row["password"], hashlib.scrypt(body.password.encode(), salt=bytes.fromhex(row["salt"]), n=16384, r=8, p=1).hex()):
                 raise HTTPException(401, "Incorrect username or password")
+            if row["banned"]:
+                raise HTTPException(403, "This account is banned")
             token = secrets.token_urlsafe(32)
             conn.execute("INSERT INTO sessions VALUES(?,?,?)", (token, row["id"], time.time() + 30 * 86400))
             conn.execute("DELETE FROM sessions WHERE user_id=? AND token NOT IN (SELECT token FROM sessions WHERE user_id=? ORDER BY expires DESC LIMIT 10)", (row["id"], row["id"]))
             response.set_cookie("session", token, httponly=True, samesite="strict", secure=request.url.scheme == "https", max_age=30 * 86400)
-            return {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "owner": row["owner"]}
+            return {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "owner": row["owner"], "admin": row["admin"]}
 
     @app.post("/api/session/logout")
     def logout(request: Request, response: Response):
@@ -374,10 +491,12 @@ def create_app(database=None, limits=None):
     def update_profile(body: ProfileUpdate, request: Request):
         member = auth(request)
         with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_active(conn, member)
             conn.execute("UPDATE users SET display_name=? WHERE id=?", (body.display_name, member["id"]))
         profile = {"id": member["id"], "username": member["username"], "display_name": body.display_name}
         hub.publish({"type": "profile", "profile": profile})
-        return {**profile, "owner": member["owner"]}
+        return {**profile, "owner": member["owner"], "admin": member["admin"]}
 
     def profile_row(conn, user_id):
         row = conn.execute("SELECT id,username,display_name,bio,nickname_color FROM users WHERE id=?", (user_id,)).fetchone()
@@ -397,6 +516,8 @@ def create_app(database=None, limits=None):
     def save_profile(body: ManagedProfile, request: Request):
         member = auth(request)
         with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_active(conn, member)
             conn.execute("UPDATE users SET display_name=?,bio=?,nickname_color=?,media_preview_override=?,notifications=?,desktop_notifications=? WHERE id=?", (body.display_name, body.bio, body.nickname_color, body.media_previews, body.notifications, body.desktop_notifications, member["id"]))
             profile = profile_row(conn, member["id"])
         hub.publish({"type": "profile", "profile": profile})
@@ -406,7 +527,7 @@ def create_app(database=None, limits=None):
     def member_directory(request: Request):
         auth(request)
         with db() as conn:
-            return [dict(row) for row in conn.execute("SELECT id,username,display_name FROM users ORDER BY username COLLATE NOCASE")]
+            return [dict(row) for row in conn.execute("SELECT id,username,display_name FROM users WHERE banned=0 ORDER BY username COLLATE NOCASE")]
 
     @app.get("/api/users/{user_id}/profile")
     def public_profile(user_id: int, request: Request):
@@ -450,27 +571,31 @@ def create_app(database=None, limits=None):
 
     @app.post("/api/admin/channels")
     def add_channel(body: Channel, request: Request):
-        if not auth(request)["owner"]:
-            raise HTTPException(403)
+        member = admin(request)
         with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_admin(conn, member)
             try:
                 cursor = conn.execute("INSERT INTO channels(name) VALUES(?)", (body.name,))
             except sqlite3.IntegrityError:
                 raise HTTPException(409, "Channel already exists")
             result = {"id": cursor.lastrowid, "name": body.name, "kind": "text"}
+            audit(conn, member, "channel.create", result["id"], body.name)
         hub.publish({"type": "channels"})
         return result
 
     @app.post("/api/admin/invites")
     def invite(request: Request):
-        if not auth(request)["owner"]:
-            raise HTTPException(403)
+        member = admin(request)
         token = secrets.token_urlsafe(18)
         with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_admin(conn, member)
             conn.execute("DELETE FROM invites WHERE expires<=?", (time.time(),))
             if conn.execute("SELECT count(*) FROM invites").fetchone()[0] >= 100:
                 raise HTTPException(409, "There are already 100 unused invites")
             conn.execute("INSERT INTO invites(token,expires) VALUES(?,?)", (token, time.time() + 7 * 86400))
+            audit(conn, member, "invite.create")
         return {"invite": token}
 
     def public_message(row, conn):
@@ -515,6 +640,7 @@ def create_app(database=None, limits=None):
         member = auth(request)
         with db() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            require_active(conn, member)
             if not conn.execute("SELECT 1 FROM channels WHERE id=? AND kind='text'", (channel_id,)).fetchone():
                 raise HTTPException(404, "Text channel not found")
             if body.message_id and not conn.execute("SELECT 1 FROM messages WHERE id=? AND channel_id=?", (body.message_id, channel_id)).fetchone():
@@ -529,6 +655,7 @@ def create_app(database=None, limits=None):
         member = auth(request)
         with db() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            require_active(conn, member)
             latest = conn.execute("SELECT value FROM message_sequence WHERE id=1").fetchone()[0]
             conn.execute("UPDATE users SET read_start_id=max(read_start_id,?) WHERE id=?", (latest, member["id"]))
             conn.execute("UPDATE channel_reads SET message_id=max(message_id,?) WHERE user_id=?", (latest, member["id"]))
@@ -590,6 +717,7 @@ def create_app(database=None, limits=None):
                 if not conn.execute("SELECT 1 FROM channels WHERE id=? AND kind='text'", (channel_id,)).fetchone():
                     raise HTTPException(404, "Text channel not found")
                 conn.execute("BEGIN IMMEDIATE")
+                require_active(conn, member)
                 inserted = not conn.execute("SELECT 1 FROM messages WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone()
                 if inserted:
                     next_id = conn.execute("UPDATE message_sequence SET value=value+1 WHERE id=1 RETURNING value").fetchone()[0]
@@ -613,6 +741,7 @@ def create_app(database=None, limits=None):
         with message_lock:
             with db() as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                require_active(conn, member)
                 row = message_row(conn, message_id)
                 if row["user_id"] != member["id"]:
                     raise HTTPException(403, "Only the author can edit a message")
@@ -635,21 +764,23 @@ def create_app(database=None, limits=None):
         with message_lock:
             with db() as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                actor = require_active(conn, member)
                 row = message_row(conn, message_id)
-                if row["user_id"] != member["id"] and not member["owner"]:
-                    raise HTTPException(403, "Only the author or owner can delete a message")
+                if row["user_id"] != member["id"] and not (actor["owner"] or actor["admin"]):
+                    raise HTTPException(403, "Only the author or an admin can delete a message")
                 if row["deleted"] is None:
                     changed = time.time()
                     conn.execute("INSERT INTO message_versions VALUES(?,?,?,?,?,?)", (message_id, row["version"], row["content"], changed, member["id"], "delete"))
                     conn.execute("UPDATE messages SET deleted=?,deleted_by=?,version=version+1 WHERE id=?", (changed, member["id"], message_id))
                     sync_mentions(conn, message_id, "")
+                    audit(conn, member, "message.delete", message_id, "channel #" + str(row["channel_id"]))
                 result = public_message(message_row(conn, message_id), conn)
             hub.publish({"type": "message_update", "message": result})
         return result
 
     @app.get("/api/admin/messages/{message_id}/history")
     def message_audit(message_id: int, request: Request, before: int = 9223372036854775807):
-        owner(request)
+        admin(request)
         with db() as conn:
             current = dict(message_row(conn, message_id))
             current.pop("nonce")

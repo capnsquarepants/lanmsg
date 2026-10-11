@@ -39,7 +39,7 @@ relaunching with a different URL.
 
 - Invite-based registration and password sign-in; first account owns the server.
 - Persistent channels and text messages, with 50-message history pages.
-- Inline message editing, soft deletion, and owner-only retained version history.
+- Inline message editing, soft deletion, and admin-only retained version history.
 - Live updates, automatic reconnect, and duplicate-safe send retries.
 - Session cookies, salted scrypt passwords, safe plain-text message rendering.
 - Owner channel creation and single-use invites; transient unread indicators.
@@ -57,17 +57,16 @@ edited marker and update connected clients immediately. A version check prevents
 an older editor from overwriting a newer change. The owner cannot edit someone
 else's message.
 
-Authors can delete their own messages; the owner can delete any message. Deletion
+Authors can delete their own messages; administrators can delete any message. Deletion
 leaves a **Message deleted** placeholder. Earlier edits and deleted text remain
-in SQLite for owner review, with the actor and time recorded for each change.
+in SQLite for administrator review, with the actor and time recorded for each change.
 Ordinary chat APIs and WebSocket events never include deleted text or prior version contents,
 even when retrying the original send. Previously received text cannot be removed
 from another person's saved copies.
 
-Only the server owner can use the history icon on a message or **Admin console > Message
+Only server administrators can use the history icon on a message or **Admin console > Message
 history** to inspect its current retained text and earlier versions. Versions load
-in pages of 50, newest first. Admin currently means the single server owner; there
-are no delegated admin roles yet. Database access and backups also contain retained
+in pages of 50, newest first. The owner can delegate admin access from the Members tab. Database access and backups also contain retained
 text. Existing databases migrate automatically. If `--retention-days` is enabled,
 expiry permanently removes the message and all its versions; otherwise both are
 kept indefinitely. There is no restore action yet.
@@ -160,7 +159,7 @@ remain available for source-level layout adjustments.
 ## Admin console
 
 The first account is the server owner and sees **Admin console** in the sidebar.
-The backend checks owner access for every console operation; ordinary members
+The backend checks administrator access for every console operation; ordinary members
 cannot read private console data or change settings by calling its APIs directly.
 
 - **Settings:** server name, description, pause/resume invite-based registration,
@@ -314,3 +313,11 @@ Preview UI checks: `node tests/media.cjs` and `node tests/link_previews.cjs`. Th
 Mentions use the unique `@username` handle, not the editable display name. Type `@` in the composer to choose a member; use arrows and Enter/Tab, or click a suggestion. Emails, URLs, unknown handles, and mass mentions do not ping members. Messages that mention you are highlighted, and unread mentions show counts beside their channel and in the window title. Read positions are stored per account and channel in SQLite, so counts survive refreshes and include offline messages. Messages advance the read position as they become visible in the focused client. Use Mark channel read or Mark all read to clear a backlog. New messages are separated at the saved read position; large backlogs support older and newer pages. The mentions inbox offers unread/all views and jumps to the message with nearby context. Existing history is marked as a baseline during the first migration; newly registered accounts start from their join point. Edits do not send new alerts; removing a mention or deleting its message clears its pending mention badge. Retrying a confirmed send does not broadcast another message.
 
 Profile notification preferences are private and saved per account: mentions only (default), all messages, or nothing, plus an opt-in desktop notification switch. Desktop permission is separately granted on each device with the explicit permission button; supported browsers require HTTPS or localhost. Desktop alerts appear while the client is open in the background and contain sender/channel without message content. Channel badges work without desktop permission. Desktop notifications remain live-only; the persistent mentions inbox covers mentions received while offline. Additional client checks: `node tests/mentions.cjs` and `node tests/read-state.cjs`.
+
+## Moderation
+
+The owner grants or revokes delegated admin access from **Admin console > Members**. Admins can manage server settings, appearance, channels, invites, ordinary-member bans, deleted-message history, and the audit log. Only the owner can grant admin access or moderate another admin. Nobody can ban the owner or themselves, and the owner role cannot be changed. Permission changes take effect in open clients; every privileged write rechecks permission inside its database transaction.
+
+Account bans revoke all sessions and close active sockets. Banned accounts cannot sign in, post, or download authenticated data. Unbanning requires a fresh sign-in. Historical messages remain attributed to the account. Ban reasons are visible only in the admin console and audit log; an account ban does not prevent someone from creating a different account if they obtain a new valid invite.
+
+The paged audit log records admin grants/revocations, bans/unbans, channel creation, settings and appearance changes, invite creation/revocation, and message deletion. It contains actor, target, time, and brief details, without message content, passwords, session tokens, or invite codes. Retained message content remains in the separate admin-only message-history view. Existing databases migrate automatically.

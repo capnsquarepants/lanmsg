@@ -194,3 +194,6 @@ legend { color: var(--muted); font-size: .8rem; padding: 0 6px; }
 #mentions-dialog { width: min(760px, 95vw); height: min(700px, 90vh); overflow: auto; }
 #mentions-results article { border-bottom: 1px solid var(--border); padding: 12px 0; }
 #mentions-results p { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+#admin-members article, #audit-results article { border-bottom: 1px solid var(--border); padding: 10px 0; overflow-wrap: anywhere; }
+.moderation-actions { display: flex; gap: 8px; flex-wrap: wrap; }
