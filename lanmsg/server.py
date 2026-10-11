@@ -13,6 +13,7 @@ import unicodedata
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -66,6 +67,20 @@ class ProfileUpdate(BaseModel):
         return value
 
 
+class ManagedProfile(ProfileUpdate):
+    bio: str = Field(default="", max_length=160)
+    nickname_color: Literal["default", "accent", "text"] = "default"
+    media_previews: bool = False
+
+    @field_validator("bio")
+    @classmethod
+    def clean_bio(cls, value):
+        value = unicodedata.normalize("NFC", value).strip()
+        if any(unicodedata.category(char).startswith("C") and char != "\n" for char in value):
+            raise ValueError("Use plain text without control characters")
+        return value
+
+
 def create_app(database=None, limits=None):
     limits = limits or Limits()
     path = Path(database or os.environ.get("LANMSG_DB", "data/lanmsg.db"))
@@ -104,6 +119,10 @@ def create_app(database=None, limits=None):
         if "display_name" not in {row["name"] for row in conn.execute("PRAGMA table_info(users)")}:
             conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
         conn.execute("UPDATE users SET display_name=username WHERE display_name=''")
+        user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+        for column, declaration in (("bio", "TEXT NOT NULL DEFAULT ''"), ("nickname_color", "TEXT NOT NULL DEFAULT 'default'"), ("media_previews", "INTEGER NOT NULL DEFAULT 0")):
+            if column not in user_columns:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {column} {declaration}")
         if "expires" not in {row["name"] for row in conn.execute("PRAGMA table_info(invites)")}:
             conn.execute("ALTER TABLE invites ADD COLUMN expires REAL NOT NULL DEFAULT 0")
             conn.execute("UPDATE invites SET expires=?", (time.time() + 7 * 86400,))
@@ -302,6 +321,35 @@ def create_app(database=None, limits=None):
         hub.publish({"type": "profile", "profile": profile})
         return {**profile, "owner": member["owner"]}
 
+    def profile_row(conn, user_id):
+        row = conn.execute("SELECT id,username,display_name,bio,nickname_color FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "User not found")
+        return dict(row)
+
+    @app.get("/api/me/profile")
+    def my_profile(request: Request):
+        member = auth(request)
+        with db() as conn:
+            profile = profile_row(conn, member["id"])
+            enabled = conn.execute("SELECT media_previews FROM users WHERE id=?", (member["id"],)).fetchone()[0]
+        return {**profile, "media_previews": bool(enabled)}
+
+    @app.put("/api/me/profile")
+    def save_profile(body: ManagedProfile, request: Request):
+        member = auth(request)
+        with db() as conn:
+            conn.execute("UPDATE users SET display_name=?,bio=?,nickname_color=?,media_previews=? WHERE id=?", (body.display_name, body.bio, body.nickname_color, body.media_previews, member["id"]))
+            profile = profile_row(conn, member["id"])
+        hub.publish({"type": "profile", "profile": profile})
+        return {**profile, "media_previews": body.media_previews}
+
+    @app.get("/api/users/{user_id}/profile")
+    def public_profile(user_id: int, request: Request):
+        auth(request)
+        with db() as conn:
+            return profile_row(conn, user_id)
+
     @app.get("/api/users/{user_id}")
     def get_profile(user_id: int, request: Request):
         auth(request)
@@ -343,12 +391,12 @@ def create_app(database=None, limits=None):
         return {"invite": token}
 
     def public_message(row):
-        result = {key: row[key] for key in ("id", "channel_id", "user_id", "created", "username", "display_name", "version", "edited", "deleted")}
+        result = {key: row[key] for key in ("id", "channel_id", "user_id", "created", "username", "display_name", "nickname_color", "version", "edited", "deleted")}
         result["content"] = "" if row["deleted"] is not None else row["content"]
         return result
 
     def message_row(conn, message_id):
-        row = conn.execute("SELECT messages.*,users.username,users.display_name FROM messages JOIN users ON users.id=user_id WHERE messages.id=?", (message_id,)).fetchone()
+        row = conn.execute("SELECT messages.*,users.username,users.display_name,users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE messages.id=?", (message_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Message not found")
         return row
@@ -357,7 +405,7 @@ def create_app(database=None, limits=None):
     def history(channel_id: int, request: Request, before: int = 9223372036854775807):
         auth(request)
         with db() as conn:
-            return [public_message(r) for r in conn.execute("SELECT messages.*, users.username, users.display_name FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id<? ORDER BY messages.id DESC LIMIT 50", (channel_id, before))][::-1]
+            return [public_message(r) for r in conn.execute("SELECT messages.*, users.username, users.display_name, users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id<? ORDER BY messages.id DESC LIMIT 50", (channel_id, before))][::-1]
 
     @app.post("/api/channels/{channel_id}/messages")
     def send(channel_id: int, body: Message, request: Request):
@@ -369,7 +417,7 @@ def create_app(database=None, limits=None):
                 if not conn.execute("SELECT 1 FROM channels WHERE id=? AND kind='text'", (channel_id,)).fetchone():
                     raise HTTPException(404, "Text channel not found")
                 conn.execute("INSERT OR IGNORE INTO messages(channel_id,user_id,content,nonce,created) VALUES(?,?,?,?,?)", (channel_id, member["id"], body.content.strip(), body.nonce, time.time()))
-                row = conn.execute("SELECT messages.*,users.username,users.display_name FROM messages JOIN users ON users.id=user_id WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone()
+                row = conn.execute("SELECT messages.*,users.username,users.display_name,users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone()
                 if row["channel_id"] != channel_id:
                     raise HTTPException(409, "This send identifier belongs to another channel")
                 result = public_message(row)

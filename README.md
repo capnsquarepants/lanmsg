@@ -72,9 +72,20 @@ text. Existing databases migrate automatically. If `--retention-days` is enabled
 expiry permanently removes the message and all its versions; otherwise both are
 kept indefinitely. There is no restore action yet.
 
-## Display names
+## Profiles and media preferences
 
-Click your name at the bottom of the channel sidebar to change your display name.
+Click your name at the bottom of the channel sidebar to manage your profile.
+Alongside your display name, you can add a plain-text bio (up to 160 characters)
+and choose a nickname color from the server default, accent, or text color.
+These choices follow the server theme; arbitrary CSS and uploads are not supported.
+Click a nickname in chat to view that person's bio and account handle.
+
+**Allow media previews** is a private account preference, saved in SQLite across
+sign-ins and devices. It defaults to off and will cover image, video, and YouTube
+embed previews. The preference is scaffolding: previews are not implemented and
+no media or embeds are fetched. Future preview rendering must check this preference
+before requesting or embedding media. Public profile APIs and broadcasts exclude it.
+
 Names can contain spaces and visible Unicode characters and need not be unique.
 The unique account username remains your sign-in handle. Click a nickname in chat
 to see the account's `@handle` and distinguish people with matching display names.
@@ -83,7 +94,8 @@ This displays handles; mention parsing and notifications are not implemented yet
 Name changes update earlier messages and connected clients immediately; account
 IDs, message authorship, permissions, and sign-in credentials stay attached to the
 same account. Existing databases upgrade automatically and use each username as
-the initial display name. Broader profile management remains a follow-up.
+the initial display name. Existing accounts receive an empty bio, the default
+nickname color, and media previews disabled.
 
 ## Appearance
 

@@ -83,30 +83,37 @@ $('admin-settings-form').onsubmit = async event => {
 };
 const profileUpdates = new Map();
 let savingName = false, viewedUserId = null, userRequest = 0;
+let mediaPreviewsEnabled = false;
+function nicknameColor(profile) {
+  return profile.nickname_color === 'accent' ? 'var(--accent)' : profile.nickname_color === 'text' ? 'var(--text)' : '';
+}
 function refreshIdentity() {
   const name = member.display_name || member.username;
   $('identity-name').textContent = name;
   $('identity-handle').textContent = '@' + member.username;
-  $('identity').title = name + ' (@' + member.username + ') — change display name';
+  $('identity').title = name + ' (@' + member.username + ') — manage profile';
   $('composer-nick').textContent = '<' + name + '>';
   $('composer-nick').title = '@' + member.username;
+  $('identity-name').style.color = nicknameColor(member); $('composer-nick').style.color = nicknameColor(member);
 }
 function showUser(profile) {
   $('user-display-name').textContent = profile.display_name;
   $('user-handle').textContent = '@' + profile.username;
+  $('user-display-name').style.color = nicknameColor(profile);
+  $('user-bio').textContent = profile.bio || ''; $('user-bio').hidden = !profile.bio;
 }
 function receiveProfile(profile) {
-  profileUpdates.set(profile.id, profile);
+  profileUpdates.set(profile.id, {...profileUpdates.get(profile.id), ...profile});
   if(member?.id === profile.id) { member = {...member, ...profile}; refreshIdentity(); }
-  if(viewedUserId === profile.id && $('user-dialog').open) showUser(profile);
+  if(viewedUserId === profile.id && $('user-dialog').open) showUser(profileUpdates.get(profile.id));
   render();
 }
 async function openUser(id) {
   const request = ++userRequest;
   try {
-    const profile = await api('/users/' + id);
+    const profile = await api('/users/' + id + '/profile');
     if(request !== userRequest) return;
-    viewedUserId = id; showUser(profileUpdates.get(id) || profile);
+    viewedUserId = id; showUser({...profile, ...profileUpdates.get(id)});
     $('user-dialog').showModal();
   } catch(error) { showError(error); }
 }
@@ -114,7 +121,10 @@ $('user-close').onclick = () => $('user-dialog').close();
 $('user-dialog').onclose = () => { viewedUserId = null; };
 $('identity').onclick = async () => {
   try {
-    member = await api('/me'); refreshIdentity();
+    const profile = await api('/me/profile'); member = {...member, ...profile}; refreshIdentity();
+    mediaPreviewsEnabled = profile.media_previews;
+    $('profile-bio').value = profile.bio; $('profile-color').value = profile.nickname_color;
+    $('profile-media-previews').checked = profile.media_previews;
     $('display-name').value = member.display_name;
     $('display-name-handle').textContent = '@' + member.username;
     $('display-name-error').textContent = ''; $('display-name-dialog').showModal();
@@ -128,8 +138,9 @@ $('display-name-form').onsubmit = async event => {
   event.preventDefault(); if(savingName) return;
   savingName = true; $('display-name-save').disabled = true; $('display-name-error').textContent = '';
   try {
-    const profile = await api('/me', {method:'PUT', body:JSON.stringify({display_name:$('display-name').value})});
-    receiveProfile(profile); $('display-name-dialog').close();
+    const profile = await api('/me/profile', {method:'PUT', body:JSON.stringify({display_name:$('display-name').value, bio:$('profile-bio').value, nickname_color:$('profile-color').value, media_previews:$('profile-media-previews').checked})});
+    mediaPreviewsEnabled = profile.media_previews; member.media_previews = profile.media_previews;
+    const {media_previews, ...publicProfile} = profile; receiveProfile(publicProfile); $('display-name-dialog').close();
   } catch(error) { $('display-name-error').textContent = error.message; }
   finally { savingName = false; $('display-name-save').disabled = false; }
 };
@@ -316,8 +327,9 @@ function render() {
       rows.push(divider); previousDay = day;
     }
     const item = document.createElement('article'); item.className = 'message' + (m.user_id === member?.id ? ' self' : '');
-    const profile = profileUpdates.get(m.user_id) || m, displayName = profile.display_name || profile.username;
+    const profile = {...m, ...profileUpdates.get(m.user_id)}, displayName = profile.display_name || profile.username;
     const name = document.createElement('button'); name.type = 'button'; name.className = 'nickname'; name.textContent = '<' + displayName + '>'; name.title = displayName + ' (@' + profile.username + ')';
+    name.style.color = nicknameColor(profile);
     name.setAttribute('aria-label', 'View ' + displayName + ', @' + profile.username); name.onclick = () => openUser(m.user_id);
     const date = document.createElement('time'); date.dateTime = timestamp.toISOString(); date.textContent = timestamp.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',hour12:false}); date.title = timestamp.toLocaleString();
     const body = document.createElement('div'); body.className = 'body'; body.textContent = m.deleted ? 'Message deleted' : m.content;
@@ -382,7 +394,8 @@ function connect() {
     $('connection').textContent = 'Connected'; $('connection').dataset.state = 'online';
     heartbeat = setInterval(() => { if(socket.readyState === WebSocket.OPEN) socket.send('ping'); },20000);
     try {
-      profileUpdates.clear(); member = await api('/me');
+      profileUpdates.clear(); member = {...await api('/me'), ...await api('/me/profile')};
+      mediaPreviewsEnabled = member.media_previews;
       if(profileUpdates.has(member.id)) member = {...member, ...profileUpdates.get(member.id)};
       refreshIdentity(); await loadServerSettings(); await loadAppearance(); await select(channel);
     } catch(error) { showError(error); }
@@ -405,6 +418,7 @@ function connect() {
   socket.onclose = () => { clearInterval(heartbeat); $('connection').textContent = 'Reconnecting…'; $('connection').dataset.state = 'offline'; reconnectTimer = setTimeout(connect,2000); };
 }
 async function start() {
+  const profile = await api('/me/profile'); member = {...member, ...profile}; mediaPreviewsEnabled = profile.media_previews;
   $('auth').hidden = true; $('chat').hidden = false; $('admin').hidden = !member.owner;
   refreshIdentity();
   await loadChannels();

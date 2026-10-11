@@ -13,7 +13,7 @@
   <aside><div class="brand"><span class="brand-mark">#</span><span id="server-name">LANmsg</span></div><div id="server-description" class="server-label">Your private network</div><p class="section-label">CHANNELS</p><nav id="channels" aria-label="Text channels"></nav>
     <div id="admin" hidden><button id="admin-open" class="quiet">Admin console</button></div>
     <div class="voice"><strong>Voice</strong><p>Planned for a future release</p></div>
-    <footer><button id="identity" class="quiet" aria-label="Change your display name"><span id="identity-name"></span><small id="identity-handle"></small></button><button id="logout" class="quiet">Sign out</button></footer>
+    <footer><button id="identity" class="quiet" aria-label="Manage your profile"><span id="identity-name"></span><small id="identity-handle"></small></button><button id="logout" class="quiet">Sign out</button></footer>
   </aside>
   <section class="conversation"><header><div><h1 id="channel-title">#general</h1><p class="channel-caption">Text channel · Make yourself at home</p></div><span class="header-label">LANmsg / text</span></header>
     <div id="messages" role="log" aria-label="Messages"><button id="older" class="quiet" hidden>↑ Load earlier messages</button><div id="message-list"></div><p id="empty" class="system-line" hidden>No messages yet. Start the conversation.</p></div>
@@ -74,15 +74,19 @@
 </dialog>
 <dialog id="display-name-dialog" aria-labelledby="display-name-title">
   <form id="display-name-form">
-    <div class="dialog-heading"><div><h2 id="display-name-title">Your display name</h2><p>Choose the name people see in chat.</p></div><button id="display-name-close" type="button" class="quiet" aria-label="Close display name editor">✕</button></div>
+    <div class="dialog-heading"><div><h2 id="display-name-title">Your profile</h2><p>Your identity, appearance, and preferences.</p></div><button id="display-name-close" type="button" class="quiet" aria-label="Close display name editor">✕</button></div>
     <p>Account handle: <strong id="display-name-handle"></strong></p>
     <label>Display name<input id="display-name" autocomplete="nickname" minlength="1" maxlength="32" required aria-describedby="display-name-help"></label>
     <p id="display-name-help">Names can be shared. Your unique handle and sign-in username stay the same. Earlier messages will show your new name.</p>
-    <p id="display-name-error" role="alert"></p><div class="dialog-actions"><button id="display-name-cancel" type="button" class="quiet">Cancel</button><button id="display-name-save">Save name</button></div>
+    <label>Bio<textarea id="profile-bio" maxlength="160" rows="3" placeholder="A little about you"></textarea></label>
+    <label>Nickname color<select id="profile-color"><option value="default">Server default</option><option value="accent">Server accent</option><option value="text">Message text color</option></select></label>
+    <fieldset><legend>Media preferences</legend><label class="checkbox-label"><input id="profile-media-previews" type="checkbox">Allow media previews</label><p class="admin-help">For future image, video, and YouTube previews. Off keeps media as links. No previews are loaded yet.</p></fieldset>
+    <p id="display-name-error" role="alert"></p><div class="dialog-actions"><button id="display-name-cancel" type="button" class="quiet">Cancel</button><button id="display-name-save">Save profile</button></div>
   </form>
 </dialog>
 <dialog id="user-dialog" aria-labelledby="user-display-name">
   <div class="dialog-heading"><div><h2 id="user-display-name"></h2><p id="user-handle"></p></div><button id="user-close" type="button" class="quiet" aria-label="Close user details">✕</button></div>
+  <p id="user-bio" style="white-space: pre-wrap; overflow-wrap: anywhere" hidden></p>
   <p>The handle uniquely identifies this account, even when display names match.</p>
 </dialog>
 
