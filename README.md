@@ -39,6 +39,7 @@ relaunching with a different URL.
 
 - Invite-based registration and password sign-in; first account owns the server.
 - Persistent channels and text messages, with 50-message history pages.
+- Inline message editing, soft deletion, and owner-only retained version history.
 - Live updates, automatic reconnect, and duplicate-safe send retries.
 - Session cookies, salted scrypt passwords, safe plain-text message rendering.
 - Owner channel creation and single-use invites; transient unread indicators.
@@ -46,6 +47,28 @@ relaunching with a different URL.
 - Server-wide appearance editor with presets, live preview, and persistent CSS tokens.
 - Editable display names with stable account IDs and unique sign-in handles.
 - Last-channel restoration on refresh, stored separately for each account in this browser.
+
+## Message editing and deletion
+
+Use **Edit** on your own messages to change their text inline. Saved edits show an
+edited marker and update connected clients immediately. A version check prevents
+an older editor from overwriting a newer change. The owner cannot edit someone
+else's message.
+
+Authors can delete their own messages; the owner can delete any message. Deletion
+leaves a **Message deleted** placeholder. Earlier edits and deleted text remain
+in SQLite for owner review, with the actor and time recorded for each change.
+Ordinary chat APIs and WebSocket events never include deleted text or prior version contents,
+even when retrying the original send. Previously received text cannot be removed
+from another person's saved copies.
+
+Only the server owner can use **History** on a message or **Admin console > Message
+history** to inspect its current retained text and earlier versions. Versions load
+in pages of 50, newest first. Admin currently means the single server owner; there
+are no delegated admin roles yet. Database access and backups also contain retained
+text. Existing databases migrate automatically. If `--retention-days` is enabled,
+expiry permanently removes the message and all its versions; otherwise both are
+kept indefinitely. There is no restore action yet.
 
 ## Display names
 
@@ -89,7 +112,8 @@ cannot read private console data or change settings by calling its APIs directly
   connection limits, concurrent API request limits, and message rate/burst limits.
 - **Channels:** view text channels and create new ones. Names are automatically lowercased, with whitespace converted to dashes.
 - **Invites:** create, view, copy by selecting a code, and revoke unused invites.
-- **Appearance:** open the existing server-wide theme editor.
+- **Appearance:** edit the server-wide theme directly within the console.
+- **Message history:** inspect retained edits and deleted text by message ID.
 
 Settings persist in SQLite. Server identity and registration controls apply
 immediately, with identity updates sent to connected clients. Operational limits

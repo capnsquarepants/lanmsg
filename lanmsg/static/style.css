@@ -136,6 +136,14 @@ legend { color: var(--muted); font-size: .8rem; padding: 0 6px; }
 #admin-error { border-left: 2px solid var(--accent); padding-left: 10px; }
 #admin-error:empty, #admin-notice:empty { display: none; }
 #admin-notice, #admin-restart { color: var(--accent); font-size: .85rem; }
+.message-actions { display: flex; gap: 6px; white-space: normal; margin-top: 2px; }
+.message-actions button { padding: 1px 4px; font-size: .75rem; }
+.message:not(:hover):not(:focus-within) .message-actions { opacity: .35; }
+.deleted-message, .edited-marker { color: var(--muted); }
+.edited-marker { font-size: .7rem; }
+#message-history-results article { border-bottom: 1px solid var(--border); padding: 8px 0; }
+#message-history-results h4 { color: var(--muted); font-size: .85rem; }
+#message-history-results pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 @media (max-width: 800px) {
   :root { --sidebar-width: 175px; --nickname-width: 12ch; }
   header, #messages { padding-left: 12px; padding-right: 12px; }

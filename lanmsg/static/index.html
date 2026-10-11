@@ -25,7 +25,7 @@
 <dialog id="admin-dialog" aria-labelledby="admin-title">
   <div class="dialog-heading"><div><h2 id="admin-title">Admin console</h2><p>Manage this server · Owner access</p></div><button id="admin-close" type="button" class="quiet" aria-label="Close admin console">✕</button></div>
   <div id="admin-stats" class="admin-stats"></div>
-  <nav class="admin-nav" aria-label="Admin sections"><button type="button" data-admin-section="settings" class="active" aria-pressed="true">Settings</button><button type="button" data-admin-section="channels" aria-pressed="false">Channels</button><button type="button" data-admin-section="invites" aria-pressed="false">Invites</button><button type="button" data-admin-section="appearance" aria-pressed="false">Appearance</button></nav>
+  <nav class="admin-nav" aria-label="Admin sections"><button type="button" data-admin-section="settings" class="active" aria-pressed="true">Settings</button><button type="button" data-admin-section="channels" aria-pressed="false">Channels</button><button type="button" data-admin-section="invites" aria-pressed="false">Invites</button><button type="button" data-admin-section="appearance" aria-pressed="false">Appearance</button><button type="button" data-admin-section="history" aria-pressed="false">Message history</button></nav>
   <div id="admin-content" class="admin-content">
   <section id="admin-section-settings">
     <form id="admin-settings-form">
@@ -48,6 +48,11 @@
   </section>
   <section id="admin-section-channels" hidden><h3>Text channels</h3><ul id="admin-channel-list" class="admin-list"></ul><form id="admin-channel-form" class="admin-inline-form"><label>Channel name<input id="admin-channel-name" required maxlength="32" pattern="[a-z0-9_-]+" placeholder="e.g. off-topic"></label><button id="add-channel">Create channel</button></form></section>
   <section id="admin-section-invites" hidden><h3>Invites</h3><p class="admin-help">Single-use codes expire after seven days. Revoking a code prevents it from being used to register.</p><button id="invite-button" type="button">Create invite</button><ul id="admin-invite-list" class="admin-list"></ul></section>
+  <section id="admin-section-history" hidden>
+    <h3>Message history</h3><p class="admin-help">Owner only. Retained versions and deleted text are never included in ordinary chat responses.</p>
+    <form id="message-history-form" class="admin-inline-form"><label>Message ID<input id="message-history-id" type="number" min="1" step="1" required></label><button>View history</button></form>
+    <div id="message-history-results"></div>
+  </section>
   <section id="admin-section-appearance" hidden>
   <form id="appearance-form">
     <h3 id="appearance-title">Server appearance</h3><p class="admin-help">Preview here. Save to apply for everyone.</p>

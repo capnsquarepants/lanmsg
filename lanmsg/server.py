@@ -38,6 +38,12 @@ class Message(BaseModel):
     nonce: str = Field(min_length=1, max_length=64)
 
 
+class MessageEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(min_length=1, max_length=4000)
+    version: int = Field(ge=1)
+
+
 class Channel(BaseModel):
     name: str = Field(min_length=1, max_length=32, pattern=r"^[a-z0-9_-]+$")
 
@@ -101,10 +107,20 @@ def create_app(database=None, limits=None):
         if "expires" not in {row["name"] for row in conn.execute("PRAGMA table_info(invites)")}:
             conn.execute("ALTER TABLE invites ADD COLUMN expires REAL NOT NULL DEFAULT 0")
             conn.execute("UPDATE invites SET expires=?", (time.time() + 7 * 86400,))
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+        for column, declaration in (("version", "INTEGER NOT NULL DEFAULT 1"), ("edited", "REAL"), ("deleted", "REAL"), ("deleted_by", "INTEGER REFERENCES users(id)")):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE messages ADD COLUMN {column} {declaration}")
+        conn.execute("""CREATE TABLE IF NOT EXISTS message_versions(
+            message_id INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+            version INTEGER NOT NULL, content TEXT NOT NULL, changed REAL NOT NULL,
+            actor_id INTEGER REFERENCES users(id), action TEXT NOT NULL,
+            PRIMARY KEY(message_id, version))""")
         stored = conn.execute("SELECT value FROM settings WHERE key='app'").fetchone()
     saved_settings = AppSettings.model_validate_json(stored["value"]) if stored else AppSettings(**{key: getattr(limits, key) for key in LIMIT_FIELDS})
     limits = replace(limits, **{key: getattr(saved_settings, key) for key in LIMIT_FIELDS})
     settings_lock = threading.Lock()
+    message_lock = threading.Lock()
 
     limiter = RateLimiter(limits.rate_keys)
 
@@ -326,24 +342,90 @@ def create_app(database=None, limits=None):
             conn.execute("INSERT INTO invites(token,expires) VALUES(?,?)", (token, time.time() + 7 * 86400))
         return {"invite": token}
 
+    def public_message(row):
+        result = {key: row[key] for key in ("id", "channel_id", "user_id", "created", "username", "display_name", "version", "edited", "deleted")}
+        result["content"] = "" if row["deleted"] is not None else row["content"]
+        return result
+
+    def message_row(conn, message_id):
+        row = conn.execute("SELECT messages.*,users.username,users.display_name FROM messages JOIN users ON users.id=user_id WHERE messages.id=?", (message_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Message not found")
+        return row
+
     @app.get("/api/channels/{channel_id}/messages")
     def history(channel_id: int, request: Request, before: int = 9223372036854775807):
         auth(request)
         with db() as conn:
-            return [dict(r) for r in conn.execute("SELECT messages.*, users.username, users.display_name FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id<? ORDER BY messages.id DESC LIMIT 50", (channel_id, before))][::-1]
+            return [public_message(r) for r in conn.execute("SELECT messages.*, users.username, users.display_name FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id<? ORDER BY messages.id DESC LIMIT 50", (channel_id, before))][::-1]
 
     @app.post("/api/channels/{channel_id}/messages")
     def send(channel_id: int, body: Message, request: Request):
         member = auth(request)
         if not body.content.strip():
             raise HTTPException(422, "Message cannot be blank")
+        with message_lock:
+            with db() as conn:
+                if not conn.execute("SELECT 1 FROM channels WHERE id=? AND kind='text'", (channel_id,)).fetchone():
+                    raise HTTPException(404, "Text channel not found")
+                conn.execute("INSERT OR IGNORE INTO messages(channel_id,user_id,content,nonce,created) VALUES(?,?,?,?,?)", (channel_id, member["id"], body.content.strip(), body.nonce, time.time()))
+                row = conn.execute("SELECT messages.*,users.username,users.display_name FROM messages JOIN users ON users.id=user_id WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone()
+                if row["channel_id"] != channel_id:
+                    raise HTTPException(409, "This send identifier belongs to another channel")
+                result = public_message(row)
+            hub.publish({"type": "message", "message": result})
+        return result
+
+    @app.put("/api/messages/{message_id}")
+    def edit_message(message_id: int, body: MessageEdit, request: Request):
+        member = auth(request)
+        content = body.content.strip()
+        if not content:
+            raise HTTPException(422, "Message cannot be blank")
+        with message_lock:
+            with db() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = message_row(conn, message_id)
+                if row["user_id"] != member["id"]:
+                    raise HTTPException(403, "Only the author can edit a message")
+                if row["deleted"] is not None:
+                    raise HTTPException(409, "Deleted messages cannot be edited")
+                if row["version"] != body.version:
+                    raise HTTPException(409, "Message changed; reload before editing")
+                if content != row["content"]:
+                    changed = time.time()
+                    conn.execute("INSERT INTO message_versions VALUES(?,?,?,?,?,?)", (message_id, row["version"], row["content"], changed, member["id"], "edit"))
+                    conn.execute("UPDATE messages SET content=?,edited=?,version=version+1 WHERE id=?", (content, changed, message_id))
+                result = public_message(message_row(conn, message_id))
+            hub.publish({"type": "message_update", "message": result})
+        return result
+
+    @app.delete("/api/messages/{message_id}")
+    def delete_message(message_id: int, request: Request):
+        member = auth(request)
+        with message_lock:
+            with db() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = message_row(conn, message_id)
+                if row["user_id"] != member["id"] and not member["owner"]:
+                    raise HTTPException(403, "Only the author or owner can delete a message")
+                if row["deleted"] is None:
+                    changed = time.time()
+                    conn.execute("INSERT INTO message_versions VALUES(?,?,?,?,?,?)", (message_id, row["version"], row["content"], changed, member["id"], "delete"))
+                    conn.execute("UPDATE messages SET deleted=?,deleted_by=?,version=version+1 WHERE id=?", (changed, member["id"], message_id))
+                result = public_message(message_row(conn, message_id))
+            hub.publish({"type": "message_update", "message": result})
+        return result
+
+    @app.get("/api/admin/messages/{message_id}/history")
+    def message_audit(message_id: int, request: Request, before: int = 9223372036854775807):
+        owner(request)
         with db() as conn:
-            if not conn.execute("SELECT 1 FROM channels WHERE id=? AND kind='text'", (channel_id,)).fetchone():
-                raise HTTPException(404, "Text channel not found")
-            conn.execute("INSERT OR IGNORE INTO messages(channel_id,user_id,content,nonce,created) VALUES(?,?,?,?,?)", (channel_id, member["id"], body.content.strip(), body.nonce, time.time()))
-            row = dict(conn.execute("SELECT messages.*,users.username,users.display_name FROM messages JOIN users ON users.id=user_id WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone())
-        hub.publish({"type": "message", "message": row})
-        return row
+            current = dict(message_row(conn, message_id))
+            current.pop("nonce")
+            versions = [dict(row) for row in conn.execute("SELECT v.*,u.username AS actor_username FROM message_versions v LEFT JOIN users u ON u.id=v.actor_id WHERE message_id=? AND version<? ORDER BY version DESC LIMIT 50", (message_id, before))]
+        return {"current": current, "versions": versions,
+                "next_before": versions[-1]["version"] if len(versions) == 50 else None}
 
     @app.websocket("/ws")
     async def websocket(socket: WebSocket):

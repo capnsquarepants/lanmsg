@@ -3,6 +3,7 @@ const $ = id => document.getElementById(id);
 let member, channel = 1, channelList = [], registering = false, socket, heartbeat, reconnectTimer;
 let generation = 0, messages = new Map(), pendingSend, loading = false;
 const unread = new Set();
+let editingMessage = null, editDraft = '', editVersion = 0, savingMessage = false;
 let savingAdmin = false, activeAdminSection = 'settings';
 const LIMIT_LABELS = {connections:'Total connections', connections_per_ip:'Connections per IP', connections_per_session:'Connections per session', http_concurrency:'Concurrent API requests', message_rate:'Messages per second / account', message_burst:'Message burst / account'};
 function receiveServerSettings(settings) {
@@ -232,7 +233,72 @@ async function loadChannels() {
   }));
 }
 function showError(error) { $('chat-error').textContent = error.message; }
+function mergeMessage(message) {
+  const previous = messages.get(message.id);
+  if(!previous || (message.version || 1) >= (previous.version || 1)) messages.set(message.id, message);
+}
+let historyRequest = 0;
+async function viewMessageHistory(id, before = null) {
+  const request = ++historyRequest;
+  const requestId = String(id);
+  if(before === null) $('message-history-results').replaceChildren();
+  clearAdminFeedback();
+  try {
+    const audit = await api('/admin/messages/' + encodeURIComponent(requestId) + '/history' + (before === null ? '' : '?before=' + before));
+    if(request !== historyRequest || $('message-history-id').value !== requestId || activeAdminSection !== 'history' || !$('admin-dialog').open) return;
+    const entries = audit.versions.map(v => ({label:`Version ${v.version} | ${v.action} by @${v.actor_username} | ${new Date(v.changed*1000).toLocaleString()}`, content:v.content}));
+    if(before === null) entries.unshift({label:`Current version ${audit.current.version} | @${audit.current.username}${audit.current.deleted ? ' | Deleted' : ''}`,content:audit.current.content});
+    for(const entry of entries) {
+      const article = document.createElement('article'), heading = document.createElement('h4'), content = document.createElement('pre');
+      heading.textContent = entry.label; content.textContent = entry.content; article.append(heading,content); $('message-history-results').append(article);
+    }
+    if(audit.current.deleted && before === null) {
+      const note = document.createElement('p'); note.textContent = `Deleted ${new Date(audit.current.deleted*1000).toLocaleString()} by user #${audit.current.deleted_by}.`;
+      $('message-history-results').append(note);
+    }
+    if(audit.next_before !== null) {
+      const more = messageAction('Load earlier versions', async () => {
+        more.disabled = true;
+        if(await viewMessageHistory(requestId, audit.next_before)) more.remove(); else more.disabled = false;
+      });
+      $('message-history-results').append(more);
+    }
+    return true;
+  } catch(error) { if(request === historyRequest) adminError(error, 'history'); }
+}
+$('message-history-form').onsubmit = event => { event.preventDefault(); viewMessageHistory($('message-history-id').value); };
+async function openMessageHistory(id) {
+  try {
+    await refreshAdmin(); selectAdminSection('history'); $('message-history-id').value = id;
+    if(!$('admin-dialog').open) $('admin-dialog').showModal();
+    await viewMessageHistory(id);
+  } catch(error) { showError(error); }
+}
+function messageAction(label, action) {
+  const button = document.createElement('button'); button.type = 'button'; button.className = 'quiet'; button.textContent = label; button.onclick = action; return button;
+}
+async function saveMessageEdit(id) {
+  if(savingMessage) return;
+  savingMessage = true; $('chat-error').textContent = ''; render();
+  try {
+    const updated = await api('/messages/' + id,{method:'PUT',body:JSON.stringify({content:editDraft,version:editVersion})});
+    if(updated.channel_id === channel) mergeMessage(updated);
+    editingMessage = null; editDraft = '';
+  } catch(error) { showError(error); }
+  finally { savingMessage = false; render(); }
+}
+async function deleteMessage(id) {
+  if(!confirm('Delete this message? Its content will remain available to the server owner.')) return;
+  try {
+    const updated = await api('/messages/' + id,{method:'DELETE'});
+    if(updated.channel_id === channel) mergeMessage(updated);
+    if(editingMessage === id) editingMessage = null;
+    render();
+  } catch(error) { showError(error); }
+}
 function render() {
+  const focused = document.activeElement;
+  const editFocus = focused?.id === 'message-edit-' + editingMessage ? {start:focused.selectionStart,end:focused.selectionEnd} : null;
   const scroller = $('messages'), nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 100;
   const rows = []; let previousDay;
   for (const m of [...messages.values()].sort((a,b) => a.id-b.id)) {
@@ -247,22 +313,44 @@ function render() {
     const name = document.createElement('button'); name.type = 'button'; name.className = 'nickname'; name.textContent = '<' + displayName + '>'; name.title = displayName + ' (@' + profile.username + ')';
     name.setAttribute('aria-label', 'View ' + displayName + ', @' + profile.username); name.onclick = () => openUser(m.user_id);
     const date = document.createElement('time'); date.dateTime = timestamp.toISOString(); date.textContent = timestamp.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',hour12:false}); date.title = timestamp.toLocaleString();
-    const body = document.createElement('div'); body.className = 'body'; body.textContent = m.content;
+    const body = document.createElement('div'); body.className = 'body'; body.textContent = m.deleted ? 'Message deleted' : m.content;
+    if(m.deleted) body.classList.add('deleted-message');
+    if(m.edited && !m.deleted) {
+      const marker = document.createElement('small'); marker.className = 'edited-marker'; marker.textContent = ' (edited)'; marker.title = new Date(m.edited*1000).toLocaleString(); body.append(marker);
+    }
+    const actions = document.createElement('div'); actions.className = 'message-actions';
+    if(!m.deleted && m.user_id === member?.id) actions.append(messageAction('Edit', () => {
+      if(savingMessage) return;
+      editingMessage = m.id; editDraft = m.content; editVersion = m.version; render();
+      $('message-edit-' + m.id)?.focus();
+    }));
+    if(!m.deleted && (m.user_id === member?.id || member?.owner)) actions.append(messageAction('Delete', () => deleteMessage(m.id)));
+    if(member?.owner) actions.append(messageAction('History', () => openMessageHistory(m.id)));
+    if(editingMessage === m.id && !m.deleted) {
+      body.replaceChildren();
+      const input = document.createElement('textarea'); input.id = 'message-edit-' + m.id; input.value = editDraft; input.maxLength = 4000; input.disabled = savingMessage; input.setAttribute('aria-label','Edit message');
+      input.oninput = () => { editDraft = input.value; };
+      const save = messageAction('Save edit', () => saveMessageEdit(m.id)), cancel = messageAction('Cancel', () => { editingMessage = null; render(); });
+      save.disabled = cancel.disabled = savingMessage;
+      body.append(input,save,cancel);
+    }
+    if(actions.childElementCount) body.append(actions);
     item.append(date,name,body); rows.push(item);
   }
   $('message-list').replaceChildren(...rows);
   $('empty').hidden = messages.size > 0;
+  if(editFocus) { const input = $('message-edit-' + editingMessage); if(input && !input.disabled) { input.focus({preventScroll:true}); input.setSelectionRange(editFocus.start,editFocus.end); } }
   if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
 }
 async function select(id) {
-  channel = id; const current = ++generation; messages.clear(); unread.delete(id);
+  channel = id; const current = ++generation; messages.clear(); if(!savingMessage) { editingMessage = null; editDraft = ''; } unread.delete(id);
   ChannelState.save(member.id, id);
   const name = channelList.find(c => c.id === id)?.name || 'general';
   $('channel-title').textContent = '#' + name; $('status-channel').textContent = '#' + name; $('content').placeholder = 'Message #' + name;
   $('older').hidden = false; await loadChannels();
   const history = await api(`/channels/${id}/messages`);
   if (current !== generation) return;
-  history.forEach(m => messages.set(m.id,m)); render(); $('older').hidden = history.length < 50;
+  history.forEach(mergeMessage); render(); $('older').hidden = history.length < 50;
   $('messages').scrollTop = $('messages').scrollHeight;
 }
 $('older').onclick = async () => {
@@ -271,7 +359,7 @@ $('older').onclick = async () => {
   try {
     const rows = await api(`/channels/${channel}/messages?before=${Math.min(...messages.keys())}`);
     if (current !== generation) return;
-    rows.forEach(m => messages.set(m.id,m)); render(); scroller.scrollTop = top + scroller.scrollHeight - height;
+    rows.forEach(mergeMessage); render(); scroller.scrollTop = top + scroller.scrollHeight - height;
     $('older').hidden = rows.length < 50;
   } catch(error) { showError(error); } finally { loading = false; }
 };
@@ -293,9 +381,12 @@ function connect() {
     if(data.type === 'server_settings') receiveServerSettings(data.settings);
     if(data.type === 'appearance') receiveTheme(data.appearance);
     if(data.type === 'channels') loadChannels().catch(showError);
+    if(data.type === 'message_update') {
+      if(data.message.channel_id === channel) { mergeMessage(data.message); render(); }
+    }
     if(data.type === 'message') {
       const m = data.message;
-      if(m.channel_id === channel) { messages.set(m.id,m); render(); }
+      if(m.channel_id === channel) { mergeMessage(m); render(); }
       else { unread.add(m.channel_id); loadChannels().catch(showError); }
     }
   };
@@ -316,7 +407,7 @@ $('composer').onsubmit = async event => {
   const attempt = pendingSend;
   try {
     const m = await api(`/channels/${attempt.channel}/messages`, {method:'POST', body:JSON.stringify(attempt)});
-    if(channel === m.channel_id) { messages.set(m.id,m); render(); }
+    if(channel === m.channel_id) { mergeMessage(m); render(); }
     if($('content').value.trim() === attempt.content) $('content').value = '';
     pendingSend = null;
   } catch(error) { showError(new Error('Message not confirmed. Press Send to retry. ' + error.message)); }
