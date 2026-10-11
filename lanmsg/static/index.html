@@ -4,7 +4,7 @@
 <body>
 <section id="auth" class="welcome">
   <form id="login"><div class="brand"><span class="brand-mark">#</span><span>LANmsg</span></div><h1>A place to talk.</h1><p id="auth-hint">Sign in to your community.</p>
-  <label>Username<input id="username" autocomplete="username" minlength="2" maxlength="32" required pattern="[a-zA-Z0-9_-]+"></label>
+  <label>Account username<input id="username" autocomplete="username" minlength="2" maxlength="32" required pattern="[a-zA-Z0-9_-]+"></label>
   <label>Password<input id="password" type="password" autocomplete="current-password" minlength="10" maxlength="128" required></label>
   <label id="invite-label" hidden>Invite code<input id="invite" autocomplete="off"></label>
   <button id="submit-auth">Sign in</button><button type="button" class="quiet" id="toggle-auth">Create an account</button><p id="auth-error" role="alert"></p></form>
@@ -13,7 +13,7 @@
   <aside><div class="brand"><span class="brand-mark">#</span><span>LANmsg</span></div><div class="server-label">Your private network</div><p class="section-label">CHANNELS</p><nav id="channels" aria-label="Text channels"></nav>
     <div id="admin" hidden><button id="add-channel" class="quiet">+ New channel</button><button id="invite-button" class="quiet">Create invite</button><button id="appearance-button" class="quiet">Appearance</button></div>
     <div class="voice"><strong>Voice</strong><p>Planned for a future release</p></div>
-    <footer><span id="identity"></span><button id="logout" class="quiet">Sign out</button></footer>
+    <footer><button id="identity" class="quiet" aria-label="Change your display name"><span id="identity-name"></span><small id="identity-handle"></small></button><button id="logout" class="quiet">Sign out</button></footer>
   </aside>
   <section class="conversation"><header><div><h1 id="channel-title">#general</h1><p class="channel-caption">Text channel · Make yourself at home</p></div><span class="header-label">LANmsg / text</span></header>
     <div id="messages" role="log" aria-label="Messages"><button id="older" class="quiet">↑ Load earlier messages</button><div id="message-list"></div><p id="empty" class="system-line" hidden>No messages yet. Start the conversation.</p></div>
@@ -22,6 +22,19 @@
     <div class="status-bar"><span id="connection" role="status">Connecting…</span><span id="status-channel">#general</span><span class="composer-hint">Enter to send · Shift+Enter for a new line</span></div>
   </section>
 </main>
+<dialog id="display-name-dialog" aria-labelledby="display-name-title">
+  <form id="display-name-form">
+    <div class="dialog-heading"><div><h2 id="display-name-title">Your display name</h2><p>Choose the name people see in chat.</p></div><button id="display-name-close" type="button" class="quiet" aria-label="Close display name editor">✕</button></div>
+    <p>Account handle: <strong id="display-name-handle"></strong></p>
+    <label>Display name<input id="display-name" autocomplete="nickname" minlength="1" maxlength="32" required aria-describedby="display-name-help"></label>
+    <p id="display-name-help">Names can be shared. Your unique handle and sign-in username stay the same. Earlier messages will show your new name.</p>
+    <p id="display-name-error" role="alert"></p><div class="dialog-actions"><button id="display-name-cancel" type="button" class="quiet">Cancel</button><button id="display-name-save">Save name</button></div>
+  </form>
+</dialog>
+<dialog id="user-dialog" aria-labelledby="user-display-name">
+  <div class="dialog-heading"><div><h2 id="user-display-name"></h2><p id="user-handle"></p></div><button id="user-close" type="button" class="quiet" aria-label="Close user details">✕</button></div>
+  <p>The handle uniquely identifies this account, even when display names match.</p>
+</dialog>
 <dialog id="appearance-dialog" aria-labelledby="appearance-title">
   <form id="appearance-form">
     <div class="dialog-heading"><div><h2 id="appearance-title">Server appearance</h2><p>Preview here. Save to apply for everyone.</p></div><button id="appearance-close" type="button" class="quiet" aria-label="Close appearance editor">✕</button></div>

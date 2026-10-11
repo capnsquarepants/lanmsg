@@ -5,13 +5,14 @@ import os
 import secrets
 import sqlite3
 import time
+import unicodedata
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .appearance import Appearance
 
@@ -31,6 +32,19 @@ class Message(BaseModel):
 
 class Channel(BaseModel):
     name: str = Field(min_length=1, max_length=32, pattern=r"^[a-z0-9_-]+$")
+
+
+class ProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    display_name: str = Field(min_length=1, max_length=32)
+
+    @field_validator("display_name")
+    @classmethod
+    def clean_display_name(cls, value):
+        value = unicodedata.normalize("NFC", value).strip()
+        if not value or any(unicodedata.category(char).startswith("C") for char in value):
+            raise ValueError("Use a visible display name without control characters")
+        return value
 
 
 def create_app(database=None):
@@ -59,6 +73,11 @@ def create_app(database=None):
         CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, channel_id INTEGER REFERENCES channels(id), user_id INTEGER REFERENCES users(id), content TEXT, nonce TEXT, created REAL, UNIQUE(user_id, nonce));
         INSERT OR IGNORE INTO channels(id,name) VALUES(1,'general');
         """)
+        # Upgrade existing databases without changing account IDs or message authors.
+        conn.execute("BEGIN IMMEDIATE")
+        if "display_name" not in {row["name"] for row in conn.execute("PRAGMA table_info(users)")}:
+            conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE users SET display_name=username WHERE display_name=''")
 
     peers = set()
 
@@ -73,7 +92,7 @@ def create_app(database=None):
 
     def user(token):
         with db() as conn:
-            row = conn.execute("SELECT users.id,username,owner FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?", (token or "", time.time())).fetchone()
+            row = conn.execute("SELECT users.id,username,display_name,owner FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?", (token or "", time.time())).fetchone()
         if not row:
             raise HTTPException(401, "Please sign in")
         return dict(row)
@@ -136,7 +155,7 @@ def create_app(database=None):
                 salt = secrets.token_hex(16)
                 password = hashlib.scrypt(body.password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1).hex()
                 try:
-                    conn.execute("INSERT INTO users(username,salt,password,owner) VALUES(?,?,?,?)", (body.username, salt, password, owner))
+                    conn.execute("INSERT INTO users(username,display_name,salt,password,owner) VALUES(?,?,?,?,?)", (body.username, body.username, salt, password, owner))
                 except sqlite3.IntegrityError:
                     raise HTTPException(409, "That username is taken")
                 conn.execute("DELETE FROM invites WHERE token=?", (body.invite,))
@@ -146,7 +165,7 @@ def create_app(database=None):
             token = secrets.token_urlsafe(32)
             conn.execute("INSERT INTO sessions VALUES(?,?,?)", (token, row["id"], time.time() + 30 * 86400))
             response.set_cookie("session", token, httponly=True, samesite="strict", secure=request.url.scheme == "https", max_age=30 * 86400)
-            return {"id": row["id"], "username": row["username"], "owner": row["owner"]}
+            return {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "owner": row["owner"]}
 
     @app.post("/api/session/logout")
     def logout(request: Request, response: Response):
@@ -159,6 +178,24 @@ def create_app(database=None):
     @app.get("/api/me")
     def me(request: Request):
         return auth(request)
+
+    @app.put("/api/me")
+    async def update_profile(body: ProfileUpdate, request: Request):
+        member = auth(request)
+        with db() as conn:
+            conn.execute("UPDATE users SET display_name=? WHERE id=?", (body.display_name, member["id"]))
+        profile = {"id": member["id"], "username": member["username"], "display_name": body.display_name}
+        await broadcast({"type": "profile", "profile": profile})
+        return {**profile, "owner": member["owner"]}
+
+    @app.get("/api/users/{user_id}")
+    def get_profile(user_id: int, request: Request):
+        auth(request)
+        with db() as conn:
+            row = conn.execute("SELECT id,username,display_name FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "User not found")
+        return dict(row)
 
     @app.get("/api/channels")
     def channels(request: Request):
@@ -192,7 +229,7 @@ def create_app(database=None):
     def history(channel_id: int, request: Request, before: int = 9223372036854775807):
         auth(request)
         with db() as conn:
-            return [dict(r) for r in conn.execute("SELECT messages.*, users.username FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id<? ORDER BY messages.id DESC LIMIT 50", (channel_id, before))][::-1]
+            return [dict(r) for r in conn.execute("SELECT messages.*, users.username, users.display_name FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id<? ORDER BY messages.id DESC LIMIT 50", (channel_id, before))][::-1]
 
     @app.post("/api/channels/{channel_id}/messages")
     async def send(channel_id: int, body: Message, request: Request):
@@ -203,7 +240,7 @@ def create_app(database=None):
             if not conn.execute("SELECT 1 FROM channels WHERE id=? AND kind='text'", (channel_id,)).fetchone():
                 raise HTTPException(404, "Text channel not found")
             conn.execute("INSERT OR IGNORE INTO messages(channel_id,user_id,content,nonce,created) VALUES(?,?,?,?,?)", (channel_id, member["id"], body.content.strip(), body.nonce, time.time()))
-            row = dict(conn.execute("SELECT messages.*,users.username FROM messages JOIN users ON users.id=user_id WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone())
+            row = dict(conn.execute("SELECT messages.*,users.username,users.display_name FROM messages JOIN users ON users.id=user_id WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone())
         await broadcast({"type": "message", "message": row})
         return row
 

@@ -3,6 +3,58 @@ const $ = id => document.getElementById(id);
 let member, channel = 1, channelList = [], registering = false, socket, heartbeat, reconnectTimer;
 let generation = 0, messages = new Map(), pendingSend, loading = false;
 const unread = new Set();
+const profileUpdates = new Map();
+let savingName = false, viewedUserId = null, userRequest = 0;
+function refreshIdentity() {
+  const name = member.display_name || member.username;
+  $('identity-name').textContent = name;
+  $('identity-handle').textContent = '@' + member.username;
+  $('identity').title = name + ' (@' + member.username + ') — change display name';
+  $('composer-nick').textContent = '<' + name + '>';
+  $('composer-nick').title = '@' + member.username;
+}
+function showUser(profile) {
+  $('user-display-name').textContent = profile.display_name;
+  $('user-handle').textContent = '@' + profile.username;
+}
+function receiveProfile(profile) {
+  profileUpdates.set(profile.id, profile);
+  if(member?.id === profile.id) { member = {...member, ...profile}; refreshIdentity(); }
+  if(viewedUserId === profile.id && $('user-dialog').open) showUser(profile);
+  render();
+}
+async function openUser(id) {
+  const request = ++userRequest;
+  try {
+    const profile = await api('/users/' + id);
+    if(request !== userRequest) return;
+    viewedUserId = id; showUser(profileUpdates.get(id) || profile);
+    $('user-dialog').showModal();
+  } catch(error) { showError(error); }
+}
+$('user-close').onclick = () => $('user-dialog').close();
+$('user-dialog').onclose = () => { viewedUserId = null; };
+$('identity').onclick = async () => {
+  try {
+    member = await api('/me'); refreshIdentity();
+    $('display-name').value = member.display_name;
+    $('display-name-handle').textContent = '@' + member.username;
+    $('display-name-error').textContent = ''; $('display-name-dialog').showModal();
+  } catch(error) { showError(error); }
+};
+function closeNameEditor() { if(!savingName) $('display-name-dialog').close(); }
+$('display-name-close').onclick = closeNameEditor;
+$('display-name-cancel').onclick = closeNameEditor;
+$('display-name-dialog').oncancel = event => { if(savingName) event.preventDefault(); };
+$('display-name-form').onsubmit = async event => {
+  event.preventDefault(); if(savingName) return;
+  savingName = true; $('display-name-save').disabled = true; $('display-name-error').textContent = '';
+  try {
+    const profile = await api('/me', {method:'PUT', body:JSON.stringify({display_name:$('display-name').value})});
+    receiveProfile(profile); $('display-name-dialog').close();
+  } catch(error) { $('display-name-error').textContent = error.message; }
+  finally { savingName = false; $('display-name-save').disabled = false; }
+};
 const DEFAULT_THEME = Object.freeze({background:'#101419', sidebar:'#171d24', panel:'#1c242e', text:'#e2e8f0', muted:'#94a3b8', accent:'#72d6bb', border:'#303b48', nickname:'#91b9f5', font:'mono', font_size:14, line_height:1.6, row_spacing:3, corner_radius:6});
 const COLOR_LABELS = {background:'Chat background', sidebar:'Sidebar & status bar', panel:'Inputs & selection', text:'Message text', muted:'Secondary text', accent:'Accent', border:'Borders', nickname:'Nicknames'};
 const PRESETS = {
@@ -120,7 +172,9 @@ function render() {
       rows.push(divider); previousDay = day;
     }
     const item = document.createElement('article'); item.className = 'message' + (m.user_id === member?.id ? ' self' : '');
-    const name = document.createElement('strong'); name.className = 'nickname'; name.textContent = '<' + m.username + '>'; name.title = m.username;
+    const profile = profileUpdates.get(m.user_id) || m, displayName = profile.display_name || profile.username;
+    const name = document.createElement('button'); name.type = 'button'; name.className = 'nickname'; name.textContent = '<' + displayName + '>'; name.title = displayName + ' (@' + profile.username + ')';
+    name.setAttribute('aria-label', 'View ' + displayName + ', @' + profile.username); name.onclick = () => openUser(m.user_id);
     const date = document.createElement('time'); date.dateTime = timestamp.toISOString(); date.textContent = timestamp.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',hour12:false}); date.title = timestamp.toLocaleString();
     const body = document.createElement('div'); body.className = 'body'; body.textContent = m.content;
     item.append(date,name,body); rows.push(item);
@@ -155,10 +209,15 @@ function connect() {
   socket.onopen = async () => {
     $('connection').textContent = 'Connected'; $('connection').dataset.state = 'online';
     heartbeat = setInterval(() => { if(socket.readyState === WebSocket.OPEN) socket.send('ping'); },20000);
-    try { await loadAppearance(); await select(channel); } catch(error) { showError(error); }
+    try {
+      profileUpdates.clear(); member = await api('/me');
+      if(profileUpdates.has(member.id)) member = {...member, ...profileUpdates.get(member.id)};
+      refreshIdentity(); await loadAppearance(); await select(channel);
+    } catch(error) { showError(error); }
   };
   socket.onmessage = event => {
     const data = JSON.parse(event.data);
+    if(data.type === 'profile') receiveProfile(data.profile);
     if(data.type === 'appearance') receiveTheme(data.appearance);
     if(data.type === 'channels') loadChannels().catch(showError);
     if(data.type === 'message') {
@@ -170,8 +229,8 @@ function connect() {
   socket.onclose = () => { clearInterval(heartbeat); $('connection').textContent = 'Reconnecting…'; $('connection').dataset.state = 'offline'; reconnectTimer = setTimeout(connect,2000); };
 }
 async function start() {
-  $('auth').hidden = true; $('chat').hidden = false; $('identity').textContent = member.username; $('admin').hidden = !member.owner;
-  $('composer-nick').textContent = '<' + member.username + '>';
+  $('auth').hidden = true; $('chat').hidden = false; $('admin').hidden = !member.owner;
+  refreshIdentity();
   await loadChannels(); await select(channel); connect();
 }
 $('composer').onsubmit = async event => {

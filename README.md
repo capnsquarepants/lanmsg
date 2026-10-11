@@ -44,6 +44,20 @@ relaunching with a different URL.
 - Owner channel creation and single-use invites; transient unread indicators.
 - IRC-inspired compact message rows, timestamps, nicknames, and date separators.
 - Server-wide appearance editor with presets, live preview, and persistent CSS tokens.
+- Editable display names with stable account IDs and unique sign-in handles.
+
+## Display names
+
+Click your name at the bottom of the channel sidebar to change your display name.
+Names can contain spaces and visible Unicode characters and need not be unique.
+The unique account username remains your sign-in handle. Click a nickname in chat
+to see the account's `@handle` and distinguish people with matching display names.
+This displays handles; mention parsing and notifications are not implemented yet.
+
+Name changes update earlier messages and connected clients immediately; account
+IDs, message authorship, permissions, and sign-in credentials stay attached to the
+same account. Existing databases upgrade automatically and use each username as
+the initial display name. Broader profile management remains a follow-up.
 
 ## Appearance
 
