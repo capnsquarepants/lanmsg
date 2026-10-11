@@ -11,6 +11,9 @@ class AppSettings(BaseModel):
     server_description: str = Field(default="Your private network", max_length=160)
     registration_enabled: bool = True
     media_previews: bool = False
+    uploads_enabled: bool = True
+    attachment_max_mb: int = Field(default=5, ge=1, le=5)
+    attachment_storage_mb: int = Field(default=250, ge=5, le=1024)
     connections: int = Field(default=100, ge=1, le=1000)
     connections_per_ip: int = Field(default=20, ge=1, le=1000)
     connections_per_session: int = Field(default=3, ge=1, le=10)
@@ -27,7 +30,7 @@ class AppSettings(BaseModel):
         return value
 
     def public(self):
-        return self.model_dump(include={"server_name", "server_description", "registration_enabled", "media_previews"})
+        return self.model_dump(include={"server_name", "server_description", "registration_enabled", "media_previews", "uploads_enabled", "attachment_max_mb"})
 
 
 LIMIT_FIELDS = ("connections", "connections_per_ip", "connections_per_session", "http_concurrency", "message_rate", "message_burst")

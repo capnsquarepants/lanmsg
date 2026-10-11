@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from .appearance import Appearance
+from .attachments import ID_PATTERN, attachment_directory, clean_filename, preview_type
 from .previews import PreviewError, PreviewService
 from .reliability import AdmissionMiddleware, Hub, Limits, RateLimiter
 from .settings import AppSettings, LIMIT_FIELDS
@@ -49,8 +50,16 @@ class Credentials(BaseModel):
 
 
 class Message(BaseModel):
-    content: str = Field(min_length=1, max_length=4000)
+    content: str = Field(default="", max_length=4000)
     nonce: str = Field(min_length=1, max_length=64)
+    attachments: list[str] = Field(default_factory=list, max_length=3)
+
+    @field_validator("attachments")
+    @classmethod
+    def attachment_ids(cls, value):
+        if len(set(value)) != len(value) or any(not ID_PATTERN.fullmatch(item) for item in value):
+            raise ValueError("Use up to three unique attachment IDs")
+        return value
 
 
 class PreviewRequest(BaseModel):
@@ -60,7 +69,7 @@ class PreviewRequest(BaseModel):
 
 class MessageEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    content: str = Field(min_length=1, max_length=4000)
+    content: str = Field(max_length=4000)
     version: int = Field(ge=1)
 
 
@@ -130,6 +139,11 @@ def create_app(database=None, limits=None):
     limits = limits or Limits()
     path = Path(database or os.environ.get("LANMSG_DB", "data/lanmsg.db"))
     path.parent.mkdir(parents=True, exist_ok=True)
+    files = attachment_directory(path)
+    files.mkdir(exist_ok=True)
+    storage_lock = threading.Lock()
+    upload_slots = threading.BoundedSemaphore(2)
+    upload_reserved = 0
 
     @contextmanager
     def db():
@@ -201,12 +215,19 @@ def create_app(database=None, limits=None):
             id INTEGER PRIMARY KEY AUTOINCREMENT,created REAL NOT NULL,
             actor_id INTEGER REFERENCES users(id),action TEXT NOT NULL,
             target_id INTEGER,detail TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS attachments(
+            id TEXT PRIMARY KEY,owner_id INTEGER REFERENCES users(id),
+            message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+            filename TEXT NOT NULL,size INTEGER NOT NULL,media_type TEXT NOT NULL,created REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS attachments_message ON attachments(message_id);
+        CREATE INDEX IF NOT EXISTS attachments_owner_pending ON attachments(owner_id,message_id,created);
         """)
+        conn.execute("BEGIN IMMEDIATE")
         if "read_start_id" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN read_start_id INTEGER NOT NULL DEFAULT 0")
             # Existing chat history is a baseline, rather than thousands of new alerts.
             conn.execute("UPDATE users SET read_start_id=(SELECT coalesce(max(id),0) FROM messages)")
-        conn.execute("UPDATE message_sequence SET value=max(value,coalesce((SELECT max(read_start_id) FROM users),0),coalesce((SELECT max(message_id) FROM channel_reads),0)) WHERE id=1")
+        conn.execute("UPDATE message_sequence SET value=max(value,coalesce((SELECT max(id) FROM messages),0),coalesce((SELECT max(read_start_id) FROM users),0),coalesce((SELECT max(message_id) FROM channel_reads),0)) WHERE id=1")
         if not conn.execute("SELECT 1 FROM settings WHERE key='mention_index'").fetchone():
             for row in conn.execute("SELECT id,content FROM messages WHERE deleted IS NULL"):
                 sync_mentions(conn, row["id"], row["content"])
@@ -227,6 +248,24 @@ def create_app(database=None, limits=None):
             conn.execute("DELETE FROM invites WHERE expires<=?", (time.time(),))
             if limits.retention_days:
                 conn.execute("DELETE FROM messages WHERE created<?", (time.time() - limits.retention_days * 86400,))
+            stale = [row[0] for row in conn.execute("SELECT id FROM attachments WHERE message_id IS NULL AND created<?", (time.time() - 3600,))]
+            conn.executemany("DELETE FROM attachments WHERE id=?", [(attachment_id,) for attachment_id in stale])
+            known = {row[0] for row in conn.execute("SELECT id FROM attachments")}
+        # Commit metadata first. An interruption can leave an orphan file, never a live row with a deleted file.
+        for attachment_id in stale:
+            if ID_PATTERN.fullmatch(attachment_id):
+                try:
+                    (files / attachment_id).unlink(missing_ok=True)
+                except OSError:
+                    pass  # A download may temporarily keep the file open on Windows; orphan cleanup retries.
+        # Recover files left by an interrupted upload without touching unrelated files.
+        for file in files.iterdir():
+            if ID_PATTERN.fullmatch(file.name.removesuffix(".tmp")) and file.name not in known:
+                try:
+                    if file.is_file() and file.stat().st_mtime < time.time() - 3600:
+                        file.unlink(missing_ok=True)
+                except OSError:
+                    continue
 
     cleanup()
 
@@ -529,6 +568,136 @@ def create_app(database=None, limits=None):
         with db() as conn:
             return [dict(row) for row in conn.execute("SELECT id,username,display_name FROM users WHERE banned=0 ORDER BY username COLLATE NOCASE")]
 
+    def attachment_info(row):
+        return {"id": row["id"], "filename": row["filename"], "size": row["size"], "media_type": row["media_type"], "url": "/api/attachments/" + row["id"]}
+
+    @app.get("/api/attachments")
+    def pending_attachments(request: Request):
+        member = auth(request)
+        with db() as conn:
+            return [attachment_info(row) for row in conn.execute("SELECT * FROM attachments WHERE owner_id=? AND message_id IS NULL ORDER BY created", (member["id"],))]
+
+    @app.post("/api/attachments")
+    async def upload_attachment(request: Request, filename: str):
+        nonlocal upload_reserved
+        member = await run_in_threadpool(auth, request)
+        if not saved_settings.uploads_enabled:
+            raise HTTPException(403, "File uploads are disabled")
+        try:
+            filename = clean_filename(filename)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
+        if not upload_slots.acquire(blocking=False):
+            raise HTTPException(503, "Uploads are busy; retry shortly", headers={"Retry-After": "1"})
+        attachment_id = secrets.token_hex(16)
+        temporary = files / (attachment_id + ".tmp")
+        destination = files / attachment_id
+        budget = saved_settings.attachment_max_mb * 1024 * 1024
+        reserved = False
+        committed = False
+        try:
+            def reserve():
+                nonlocal upload_reserved
+                with storage_lock, db() as conn:
+                    total, count = conn.execute("SELECT coalesce(sum(size),0),count(*) FROM attachments").fetchone()
+                    if count >= 10000 or total + upload_reserved + budget > saved_settings.attachment_storage_mb * 1024 * 1024:
+                        raise HTTPException(507, "Attachment storage budget is full")
+                    if shutil.disk_usage(path.parent).free < limits.minimum_free_bytes + upload_reserved + budget:
+                        raise HTTPException(507, "Server is low on disk space")
+                    if conn.execute("SELECT count(*) FROM attachments WHERE owner_id=? AND message_id IS NULL", (member["id"],)).fetchone()[0] >= 3:
+                        raise HTTPException(409, "Send or remove your pending attachments first")
+                    upload_reserved += budget
+            await run_in_threadpool(reserve)
+            reserved = True
+            size = 0
+            header = b""
+            async with asyncio.timeout(30):
+                with temporary.open("xb") as output:
+                    async for chunk in request.stream():
+                        size += len(chunk)
+                        if size > budget:
+                            raise HTTPException(413, "File exceeds the server's upload limit")
+                        if len(header) < 32:
+                            header += chunk[:32-len(header)]
+                        if chunk:
+                            await run_in_threadpool(output.write, chunk)
+            if not size:
+                raise HTTPException(422, "Empty files cannot be uploaded")
+            media_type = preview_type(header, filename)
+            def finish():
+                nonlocal committed
+                with storage_lock, db() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    require_active(conn, member)
+                    if not saved_settings.uploads_enabled or size > saved_settings.attachment_max_mb * 1024 * 1024:
+                        raise HTTPException(403, "Upload settings changed; retry with the current limits")
+                    total, count = conn.execute("SELECT coalesce(sum(size),0),count(*) FROM attachments").fetchone()
+                    if count >= 10000 or total + size > saved_settings.attachment_storage_mb * 1024 * 1024 or shutil.disk_usage(path.parent).free < limits.minimum_free_bytes:
+                        raise HTTPException(507, "Attachment storage budget is full or disk space is low")
+                    if conn.execute("SELECT count(*) FROM attachments WHERE owner_id=? AND message_id IS NULL", (member["id"],)).fetchone()[0] >= 3:
+                        raise HTTPException(409, "Send or remove your pending attachments first")
+                    temporary.rename(destination)
+                    conn.execute("INSERT INTO attachments VALUES(?,?,NULL,?,?,?,?)", (attachment_id, member["id"], filename, size, media_type, time.time()))
+                committed = True
+            task = asyncio.create_task(run_in_threadpool(finish))
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
+            return {"id": attachment_id, "filename": filename, "size": size, "media_type": media_type, "url": "/api/attachments/" + attachment_id}
+        except TimeoutError:
+            raise HTTPException(408, "Upload timed out") from None
+        except OSError:
+            raise HTTPException(507, "Could not store the attachment") from None
+        finally:
+            temporary.unlink(missing_ok=True)
+            if not committed:
+                destination.unlink(missing_ok=True)
+            if reserved:
+                with storage_lock:
+                    upload_reserved -= budget
+            upload_slots.release()
+
+    @app.delete("/api/attachments/{attachment_id}")
+    def discard_attachment(attachment_id: str, request: Request):
+        member = auth(request)
+        if not ID_PATTERN.fullmatch(attachment_id):
+            raise HTTPException(404, "Attachment not found")
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_active(conn, member)
+            row = conn.execute("SELECT * FROM attachments WHERE id=?", (attachment_id,)).fetchone()
+            if not row or row["owner_id"] != member["id"]:
+                raise HTTPException(404, "Attachment not found")
+            if row["message_id"] is not None:
+                raise HTTPException(409, "Delete the message to remove a sent attachment")
+            (files / attachment_id).unlink(missing_ok=True)
+            conn.execute("DELETE FROM attachments WHERE id=?", (attachment_id,))
+        return {"ok": True}
+
+    @app.get("/api/attachments/{attachment_id}")
+    def download_attachment(attachment_id: str, request: Request, inline: bool = False):
+        member = auth(request)
+        if not ID_PATTERN.fullmatch(attachment_id):
+            raise HTTPException(404, "Attachment not found")
+        with db() as conn:
+            row = conn.execute("SELECT a.*,m.deleted FROM attachments a LEFT JOIN messages m ON m.id=a.message_id WHERE a.id=?", (attachment_id,)).fetchone()
+            if not row or (row["message_id"] is None and row["owner_id"] != member["id"]) or (row["deleted"] is not None and not (member["owner"] or member["admin"])):
+                raise HTTPException(404, "Attachment not found")
+            if inline:
+                override = conn.execute("SELECT media_preview_override FROM users WHERE id=?", (member["id"],)).fetchone()[0]
+                if not (saved_settings.media_previews if override is None else bool(override)):
+                    raise HTTPException(403, "Previews are disabled for your account")
+                if not row["media_type"].startswith(("image/", "video/")):
+                    raise HTTPException(415, "This file cannot be previewed inline")
+        file = files / attachment_id
+        if not file.is_file():
+            raise HTTPException(404, "Attachment file is unavailable")
+        return FileResponse(file, filename=row["filename"], content_disposition_type="inline" if inline else "attachment",
+                            media_type=row["media_type"] if inline else "application/octet-stream",
+                            headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox; default-src 'none'"})
+
     @app.get("/api/users/{user_id}/profile")
     def public_profile(user_id: int, request: Request):
         auth(request)
@@ -602,6 +771,7 @@ def create_app(database=None, limits=None):
         result = {key: row[key] for key in ("id", "channel_id", "user_id", "created", "username", "display_name", "nickname_color", "version", "edited", "deleted")}
         result["content"] = "" if row["deleted"] is not None else row["content"]
         result["mentions"] = []
+        result["attachments"] = [] if row["deleted"] is not None else [attachment_info(file) for file in conn.execute("SELECT * FROM attachments WHERE message_id=? ORDER BY id", (row["id"],))]
         if result["content"]:
             result["mentions"] = [dict(user) for user in conn.execute("SELECT u.id,u.username FROM message_mentions mm JOIN users u ON u.id=mm.user_id WHERE mm.message_id=? ORDER BY u.id", (row["id"],))]
         return result
@@ -710,7 +880,7 @@ def create_app(database=None, limits=None):
     @app.post("/api/channels/{channel_id}/messages")
     def send(channel_id: int, body: Message, request: Request):
         member = auth(request)
-        if not body.content.strip():
+        if not body.content.strip() and not body.attachments:
             raise HTTPException(422, "Message cannot be blank")
         with message_lock:
             with db() as conn:
@@ -720,8 +890,15 @@ def create_app(database=None, limits=None):
                 require_active(conn, member)
                 inserted = not conn.execute("SELECT 1 FROM messages WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone()
                 if inserted:
+                    if body.attachments and not saved_settings.uploads_enabled:
+                        raise HTTPException(403, "File uploads are disabled")
+                    for attachment_id in body.attachments:
+                        file = conn.execute("SELECT owner_id,message_id FROM attachments WHERE id=?", (attachment_id,)).fetchone()
+                        if not file or file["owner_id"] != member["id"] or file["message_id"] is not None:
+                            raise HTTPException(422, "Attachments must be your own unsent uploads")
                     next_id = conn.execute("UPDATE message_sequence SET value=value+1 WHERE id=1 RETURNING value").fetchone()[0]
                     conn.execute("INSERT INTO messages(id,channel_id,user_id,content,nonce,created) VALUES(?,?,?,?,?,?)", (next_id, channel_id, member["id"], body.content.strip(), body.nonce, time.time()))
+                    conn.executemany("UPDATE attachments SET message_id=? WHERE id=?", [(next_id, attachment_id) for attachment_id in body.attachments])
                 row = conn.execute("SELECT messages.*,users.username,users.display_name,users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone()
                 if row["channel_id"] != channel_id:
                     raise HTTPException(409, "This send identifier belongs to another channel")
@@ -736,13 +913,13 @@ def create_app(database=None, limits=None):
     def edit_message(message_id: int, body: MessageEdit, request: Request):
         member = auth(request)
         content = body.content.strip()
-        if not content:
-            raise HTTPException(422, "Message cannot be blank")
         with message_lock:
             with db() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 require_active(conn, member)
                 row = message_row(conn, message_id)
+                if not content and not conn.execute("SELECT 1 FROM attachments WHERE message_id=?", (message_id,)).fetchone():
+                    raise HTTPException(422, "Message cannot be blank")
                 if row["user_id"] != member["id"]:
                     raise HTTPException(403, "Only the author can edit a message")
                 if row["deleted"] is not None:
@@ -784,6 +961,7 @@ def create_app(database=None, limits=None):
         with db() as conn:
             current = dict(message_row(conn, message_id))
             current.pop("nonce")
+            current["attachments"] = [attachment_info(file) for file in conn.execute("SELECT * FROM attachments WHERE message_id=? ORDER BY id", (message_id,))]
             versions = [dict(row) for row in conn.execute("SELECT v.*,u.username AS actor_username FROM message_versions v LEFT JOIN users u ON u.id=v.actor_id WHERE message_id=? AND version<? ORDER BY version DESC LIMIT 50", (message_id, before))]
         return {"current": current, "versions": versions,
                 "next_before": versions[-1]["version"] if len(versions) == 50 else None}

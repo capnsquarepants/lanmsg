@@ -45,7 +45,7 @@ def test_live_identity_registration_and_invite_revocation(tmp_path):
             assert result.status_code == 200
             assert result.json()['restart_required'] is False
             event = socket.receive_json()
-            assert event == {'type':'server_settings','settings':{'server_name':'Friends LAN','server_description':'Our chat','registration_enabled':False,'media_previews':False}}
+            assert event == {'type':'server_settings','settings':{'server_name':'Friends LAN','server_description':'Our chat','registration_enabled':False,'media_previews':False,'uploads_enabled':True,'attachment_max_mb':5}}
         public = guest.get('/api/status').json()
         assert public['server_name'] == 'Friends LAN'
         assert 'connections_per_ip' not in public

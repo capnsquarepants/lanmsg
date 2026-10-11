@@ -14,6 +14,7 @@ class Limits:
     http_concurrency: int = 32
     auth_concurrency: int = 2
     body_bytes: int = 32768
+    attachment_bytes: int = 5 * 1024 * 1024
     connections: int = 100
     connections_per_session: int = 3
     connections_per_ip: int = 20
@@ -66,9 +67,10 @@ class AdmissionMiddleware:
             await self.app(scope, receive, send)
             return
         headers = dict(scope["headers"])
+        body_limit = self.limits.attachment_bytes if scope["path"] == "/api/attachments" and scope["method"] == "POST" else self.limits.body_bytes
         length = headers.get(b"content-length", b"0")
         try:
-            oversized = int(length) > self.limits.body_bytes
+            oversized = int(length) > body_limit
         except ValueError:
             await JSONResponse({"detail": "Invalid Content-Length"}, 400)(scope, receive, send)
             return
@@ -96,7 +98,7 @@ class AdmissionMiddleware:
             except asyncio.TimeoutError:
                 raise HTTPException(408, "Request body timed out")
             received += len(message.get("body", b""))
-            if received > self.limits.body_bytes:
+            if received > body_limit:
                 raise HTTPException(413, "Request body is too large")
             return message
         try:

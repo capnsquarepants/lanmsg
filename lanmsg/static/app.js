@@ -9,7 +9,8 @@ let readBoundary = null, hasNewer = false, selecting = false, mentionsCursor = n
 const unreadDivider = document.createElement('div'); unreadDivider.className = 'new-messages-divider'; unreadDivider.textContent = 'New messages';
 let directory = [], directoryFetched = 0, directoryFetching = false, suggestionIndex = 0, suggestionState = null;
 const messageRows = new Map(), dayRows = new Map();
-let serverMediaPreviews = false;
+let serverMediaPreviews = false, serverUploads = true, maxUploadMB = 5;
+let draftAttachments = [], uploading = false, sendingMessage = false, uploadController;
 let editingMessage = null, editDraft = '', editVersion = 0, savingMessage = false;
 let savingAdmin = false, activeAdminSection = 'settings';
 const LIMIT_LABELS = {connections:'Total connections', connections_per_ip:'Connections per IP', connections_per_session:'Connections per session', http_concurrency:'Concurrent API requests', message_rate:'Messages per second / account', message_burst:'Message burst / account'};
@@ -146,6 +147,47 @@ function refreshSuggestions() {
     api('/users').then(users => { directory = users; if(document.activeElement === input) refreshSuggestions(); }).catch(showError).finally(() => { directoryFetching = false; });
   }
 }
+function updateUploadControls() {
+  $('attach-file').disabled = !member || !serverUploads || uploading || sendingMessage || draftAttachments.length >= 3;
+  $('attachment-input').disabled = $('attach-file').disabled;
+  $('send').disabled = !member || uploading || sendingMessage;
+  for(const button of $('attachment-draft').querySelectorAll('button')) button.disabled = uploading || sendingMessage;
+  $('attach-file').title = 'Up to three files, ' + maxUploadMB + ' MB each';
+}
+function drawAttachmentDraft() {
+  $('attachment-draft').replaceChildren(...draftAttachments.map(file => {
+    const item = document.createElement('div'), name = document.createElement('span');
+    name.textContent = file.filename + ' (' + Attachments.size(file.size) + ') ';
+    const remove = messageAction('Remove',async () => {
+      remove.disabled = true;
+      try { await api('/attachments/' + file.id,{method:'DELETE'}); draftAttachments = draftAttachments.filter(value => value.id !== file.id); drawAttachmentDraft(); }
+      catch(error) { showError(error); remove.disabled = false; }
+    }); item.append(name,remove); return item;
+  })); updateUploadControls();
+}
+$('attach-file').onclick = () => $('attachment-input').click();
+$('attachment-input').onchange = async () => {
+  const files = [...$('attachment-input').files]; $('attachment-input').value = '';
+  if(!member || uploading || sendingMessage || !files.length) return;
+  if(files.length + draftAttachments.length > 3) { showError(new Error('Choose up to three attachments per message.')); return; }
+  if(files.some(file => !file.size || file.size > maxUploadMB * 1048576)) { showError(new Error('Choose nonempty files of ' + maxUploadMB + ' MB or less.')); return; }
+  const account = member.id; uploading = true; updateUploadControls(); $('chat-error').textContent = '';
+  try {
+    for(const file of files) {
+      uploadController = new AbortController(); const deadline = setTimeout(() => uploadController.abort(),35000);
+      $('upload-status').textContent = 'Uploading ' + file.name + '…';
+      try {
+        const response = await fetch('/api/attachments?filename=' + encodeURIComponent(file.name),{method:'POST',headers:{'Content-Type':'application/octet-stream','X-LANmsg':'1'},body:file,signal:uploadController.signal});
+        const metadata = await response.json();
+        if(response.status === 401) endSession();
+        if(!response.ok) throw new Error(typeof metadata.detail === 'string' ? metadata.detail : 'Upload failed.');
+        if(member?.id !== account) return;
+        draftAttachments.push(metadata); drawAttachmentDraft();
+      } finally { clearTimeout(deadline); }
+    }
+  } catch(error) { showError(new Error(error.name === 'AbortError' ? 'Upload interrupted. Refresh to recover any completed upload.' : error.message)); }
+  finally { uploading = false; uploadController = null; $('upload-status').textContent = ''; updateUploadControls(); }
+};
 function suggestionKey(event) {
   if(!suggestionState?.users.length || event.isComposing) return false;
   if(['ArrowDown','ArrowUp'].includes(event.key)) {
@@ -165,6 +207,7 @@ function receiveServerSettings(settings) {
   document.title = settings.server_name + ' · LANmsg';
   $('toggle-auth').hidden = !settings.registration_enabled;
   serverMediaPreviews = settings.media_previews === true;
+  serverUploads = settings.uploads_enabled !== false; maxUploadMB = settings.attachment_max_mb || 5; updateUploadControls();
   updateMediaPreference(member?.media_previews ?? null); updateAlertTitle();
   if(!settings.registration_enabled && registering) { registering = false; authMode(); }
 }
@@ -418,7 +461,8 @@ function drawChannels() {
 }
 function showError(error) { $('chat-error').textContent = error.message; }
 function endSession() {
-  member = null; clearInterval(heartbeat); clearTimeout(reconnectTimer); clearTimeout(viewportTimer); clearTimeout(readRefreshTimer);
+  uploadController?.abort();
+  member = null; draftAttachments = []; drawAttachmentDraft(); uploading = false; sendingMessage = false; clearInterval(heartbeat); clearTimeout(reconnectTimer); clearTimeout(viewportTimer); clearTimeout(readRefreshTimer);
   if(socket) { socket.onclose = null; socket.close(); }
   for(const alert of desktopAlerts.values()) alert.close(); desktopAlerts.clear();
   for(const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
@@ -501,6 +545,7 @@ async function viewMessageHistory(id, before = null) {
       const note = document.createElement('p'); note.textContent = `Deleted ${new Date(audit.current.deleted*1000).toLocaleString()} by user #${audit.current.deleted_by}.`;
       $('message-history-results').append(note);
     }
+    if(before === null) Attachments.append($('message-history-results'),audit.current.attachments,false);
     if(audit.next_before !== null) {
       const more = messageAction('Load earlier versions', async () => {
         more.disabled = true;
@@ -562,7 +607,7 @@ function render() {
     }
     if(!divided && readBoundary !== null && m.id > readBoundary && !m.deleted && m.user_id !== member?.id) { rows.push(unreadDivider); divided = true; }
     const profile = {...m, ...profileUpdates.get(m.user_id)}, displayName = profile.display_name || profile.username;
-    const signature = JSON.stringify([m.version, m.content, m.deleted, m.edited, profile.display_name, profile.username, profile.nickname_color, mediaPreviewsEnabled, member?.owner, member?.admin, m.mentions]);
+    const signature = JSON.stringify([m.version, m.content, m.deleted, m.edited, profile.display_name, profile.username, profile.nickname_color, mediaPreviewsEnabled, member?.owner, member?.admin, m.mentions, m.attachments]);
     const cached = messageRows.get(m.id);
     if(editingMessage !== m.id && cached?.signature === signature) { rows.push(cached.item); continue; }
     const item = document.createElement('article'); item.className = 'message' + (m.user_id === member?.id ? ' self' : '');
@@ -578,7 +623,10 @@ function render() {
     if(m.edited && !m.deleted) {
       const marker = document.createElement('small'); marker.className = 'edited-marker'; marker.textContent = ' (edited)'; marker.title = new Date(m.edited*1000).toLocaleString(); body.append(marker);
     }
-    if(!m.deleted && editingMessage !== m.id) MediaPreviews.appendPreviews(body, m.content, mediaPreviewsEnabled);
+    if(!m.deleted && editingMessage !== m.id) {
+      const previews = Attachments.append(body,m.attachments,mediaPreviewsEnabled);
+      MediaPreviews.appendPreviews(body,m.content,mediaPreviewsEnabled,3-previews);
+    }
     const actions = document.createElement('div'); actions.className = 'message-actions';
     actions.setAttribute('role', 'group'); actions.setAttribute('aria-label', 'Message actions');
     if(!m.deleted && m.user_id === member?.id) actions.append(messageIcon('Edit message', 'edit-pencil', () => {
@@ -609,7 +657,7 @@ function render() {
   rows.forEach((row,index) => { if(list.children[index] !== row) list.insertBefore(row,list.children[index] || null); });
   for(const [id,cached] of messageRows) if(!messages.has(id)) messageRows.delete(id);
   for(const [day,row] of dayRows) if(!desired.has(row)) dayRows.delete(day);
-  $('empty').hidden = messages.size > 0;
+  $('empty').hidden = selecting || messages.size > 0;
   if(editFocus) { const input = $('message-edit-' + editingMessage); if(input && !input.disabled) { input.focus({preventScroll:true}); input.setSelectionRange(editFocus.start,editFocus.end); } }
   if (nearBottom && !hasNewer) scroller.scrollTop = scroller.scrollHeight;
   scheduleViewportRead();
@@ -628,7 +676,7 @@ async function select(id, around = null) {
     // Live deliveries during this request are merged by version, preserving edits/deletions.
     view.messages.forEach(mergeMessage); readBoundary = view.read_id; hasNewer = view.has_newer;
     if(hasNewer && view.messages.length) { const end = view.messages.at(-1).id; for(const key of messages.keys()) if(key > end) messages.delete(key); }
-    render(); $('older').hidden = !view.has_older; $('newer').hidden = !hasNewer;
+    selecting = false; render(); $('older').hidden = !view.has_older; $('newer').hidden = !hasNewer;
     const target = around === null ? $('message-list').querySelector('.new-messages-divider') : $('message-' + around);
     if(target) { target.scrollIntoView({block:'start'}); if(around !== null) target.classList.add('jump-target'); }
     else $('messages').scrollTop = $('messages').scrollHeight;
@@ -704,22 +752,25 @@ async function start() {
   directory = await api('/users'); seenEvents.clear();
   await loadChannels();
   channel = ChannelState.restore(member.id, channelList);
+  draftAttachments = await api('/attachments'); drawAttachmentDraft();
   await select(channel); connect();
 }
 $('composer').onsubmit = async event => {
-  event.preventDefault(); const content = $('content').value.trim(); if(!content) return;
+  event.preventDefault(); if(uploading || sendingMessage) return; const content = $('content').value.trim(); if(!content && !draftAttachments.length) return;
+  sendingMessage = true; updateUploadControls();
   $('send').disabled = true; $('chat-error').textContent = '';
   // Keep the same nonce after an ambiguous network failure, so retrying cannot duplicate a message.
-  if(!pendingSend || pendingSend.content !== content || pendingSend.channel !== channel) pendingSend = {content,channel,nonce:globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`};
+  if(!pendingSend || pendingSend.content !== content || pendingSend.channel !== channel || JSON.stringify(pendingSend.attachments) !== JSON.stringify(draftAttachments.map(file => file.id))) pendingSend = {content,channel,attachments:draftAttachments.map(file => file.id),nonce:globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`};
   const attempt = pendingSend;
   try {
     const m = await api(`/channels/${attempt.channel}/messages`, {method:'POST', body:JSON.stringify(attempt)});
     if(channel === m.channel_id && !hasNewer) { mergeMessage(m); render(); }
     scheduleReadRefresh();
     if($('content').value.trim() === attempt.content) $('content').value = ''; hideSuggestions();
+    draftAttachments = draftAttachments.filter(file => !attempt.attachments.includes(file.id)); drawAttachmentDraft();
     pendingSend = null;
   } catch(error) { showError(new Error('Message not confirmed. Press Send to retry. ' + error.message)); }
-  finally { $('send').disabled = false; $('content').focus(); }
+  finally { sendingMessage = false; updateUploadControls(); $('content').focus(); }
 };
 $('content').onkeydown = event => { if(suggestionKey(event)) return; if(event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if(!$('send').disabled) $('composer').requestSubmit(); } };
 $('admin-channel-name').oninput = () => {

@@ -23,9 +23,10 @@ const context = vm.createContext({URL, location:{protocol:'http:'}, document:{
 }});
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../lanmsg/static/media.js'),'utf8'),context);
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../lanmsg/static/mentions.js'),'utf8'),context);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../lanmsg/static/attachments.js'),'utf8'),context);
 context.openUser = () => {};
 context.scheduleViewportRead = () => {};
-context.readBoundary = null; context.hasNewer = false;
+context.readBoundary = null; context.hasNewer = false; context.selecting = false;
 const media = context.MediaPreviews;
 for(const defaultValue of [false,true]) {
   assert.equal(media.enabled(null,defaultValue),defaultValue);

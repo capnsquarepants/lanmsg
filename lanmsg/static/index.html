@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LANmsg</title><link rel="stylesheet" href="/static/style.css"><script src="/static/channel-state.js" defer></script><script src="/static/media.js" defer></script><script src="/static/mentions.js" defer></script><script src="/static/app.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LANmsg</title><link rel="stylesheet" href="/static/style.css"><script src="/static/channel-state.js" defer></script><script src="/static/media.js" defer></script><script src="/static/mentions.js" defer></script><script src="/static/attachments.js" defer></script><script src="/static/app.js" defer></script></head>
 <body>
 <section id="auth" class="welcome">
   <form id="login"><div class="brand"><span class="brand-mark">#</span><span>LANmsg</span></div><h1>A place to talk.</h1><p id="auth-hint">Sign in to your community.</p>
@@ -18,7 +18,8 @@
   </aside>
   <section class="conversation"><header><div><h1 id="channel-title">#general</h1><p class="channel-caption">Text channel · Make yourself at home</p></div><button id="mark-channel-read" class="quiet">Mark channel read</button></header>
     <div id="messages" role="log" aria-label="Messages"><button id="older" class="quiet" hidden>↑ Load earlier messages</button><div id="message-list"></div><button id="newer" class="quiet" hidden>Load newer messages</button><p id="empty" class="system-line" hidden>No messages yet. Start the conversation.</p></div>
-    <div class="compose-area"><div id="mention-suggestions" role="group" aria-label="Mention suggestions" hidden></div><form id="composer"><span id="composer-nick" class="composer-nick" aria-hidden="true"></span><label class="sr-only" for="content">Message</label><textarea id="content" placeholder="Message #general" maxlength="4000" rows="1" required></textarea><button id="send">Send ↵</button></form>
+    <div class="compose-area"><div id="mention-suggestions" role="group" aria-label="Mention suggestions" hidden></div><form id="composer"><span id="composer-nick" class="composer-nick" aria-hidden="true"></span><label class="sr-only" for="content">Message</label><textarea id="content" placeholder="Message #general" maxlength="4000" rows="1"></textarea><button id="attach-file" type="button" class="quiet">Attach</button><input id="attachment-input" type="file" multiple hidden><button id="send">Send ↵</button></form>
+    <div id="attachment-draft"></div><p id="upload-status" role="status"></p>
     <p id="chat-error" role="alert"></p></div>
     <div class="status-bar"><span id="connection" role="status">Connecting…</span><span id="status-channel">#general</span><span class="composer-hint">Enter to send · Shift+Enter for a new line</span></div>
   </section>
@@ -37,6 +38,7 @@
         <label class="checkbox-label"><input name="registration_enabled" type="checkbox">Allow new accounts with valid invites</label>
         <label class="checkbox-label"><input name="media_previews" type="checkbox">Enable media previews by default</label><p class="admin-help">Users can override this default in either direction from their profile.</p>
       </fieldset>
+      <fieldset><legend>Attachments</legend><label class="checkbox-label"><input name="uploads_enabled" type="checkbox">Allow file uploads</label><div class="theme-grid"><label>Maximum file size (MB)<input name="attachment_max_mb" type="number" min="1" max="5" required></label><label>Attachment storage budget (MB)<input name="attachment_storage_mb" type="number" min="5" max="1024" required></label></div><p class="admin-help">Up to three files per message. Changes apply immediately; existing downloads remain available.</p></fieldset>
       <fieldset><legend>Connection limits · Requires restart</legend><div class="theme-grid">
         <label>Total connections<input name="connections" type="number" min="1" max="1000" required></label>
         <label>Connections per IP<input name="connections_per_ip" type="number" min="1" max="1000" required></label>

@@ -112,8 +112,8 @@ globalThis.MediaPreviews = (() => {
   function appendText(body, text) {
     for(const token of tokens(text)) body.append(token.url ? link(token.url, token.text) : document.createTextNode(token.text));
   }
-  function appendPreviews(body, text, allow) {
-    if(!allow) return; // Do not create src attributes or initiate requests when disabled.
+  function appendPreviews(body, text, allow, maximum = 3) {
+    if(!allow || maximum <= 0) return; // Do not create src attributes or initiate requests when disabled.
     const previews = document.createElement('div'); previews.className = 'media-previews';
     const seen = new Set();
     for(const token of tokens(text)) {
@@ -129,7 +129,7 @@ globalThis.MediaPreviews = (() => {
         previews.append(figure);
         if(observer) observer.observe(figure);
         else setTimeout(() => schedule(figure,media.url),0);
-        if(seen.size === 3) break;
+        if(seen.size >= maximum) break;
         continue;
       }
       let element;
@@ -151,7 +151,7 @@ globalThis.MediaPreviews = (() => {
       };
       const caption = document.createElement('figcaption'); caption.append(link(media.url, 'Open ' + (media.kind === 'youtube' ? 'on YouTube' : new URL(media.url).hostname)));
       figure.append(element,caption); previews.append(figure);
-      if(seen.size === 3) break;
+      if(seen.size >= maximum) break;
     }
     if(previews.childElementCount) body.append(previews);
   }
