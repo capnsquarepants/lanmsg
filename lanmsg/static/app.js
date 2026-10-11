@@ -55,7 +55,7 @@ $('display-name-form').onsubmit = async event => {
   } catch(error) { $('display-name-error').textContent = error.message; }
   finally { savingName = false; $('display-name-save').disabled = false; }
 };
-const DEFAULT_THEME = Object.freeze({background:'#101419', sidebar:'#171d24', panel:'#1c242e', text:'#e2e8f0', muted:'#94a3b8', accent:'#72d6bb', border:'#303b48', nickname:'#91b9f5', font:'mono', font_size:14, line_height:1.6, row_spacing:3, corner_radius:6});
+const DEFAULT_THEME = Object.freeze({background:'#101419', sidebar:'#171d24', panel:'#1c242e', text:'#e2e8f0', muted:'#94a3b8', accent:'#72d6bb', border:'#303b48', nickname:'#91b9f5', font:'mono', font_size:14, line_height:1.6, row_spacing:3, corner_radius:0});
 const COLOR_LABELS = {background:'Chat background', sidebar:'Sidebar & status bar', panel:'Inputs & selection', text:'Message text', muted:'Secondary text', accent:'Accent', border:'Borders', nickname:'Nicknames'};
 const PRESETS = {
   default: DEFAULT_THEME,

@@ -1,0 +1,27 @@
+{
+  "users": 10,
+  "channels": 3,
+  "messages_attempted": 200,
+  "messages_persisted": 200,
+  "delivery_counts_per_client": [
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200
+  ],
+  "http_failures": [],
+  "elapsed_seconds": 13.36,
+  "messages_per_second": 14.97,
+  "send_latency_ms_p50": 37.35,
+  "send_latency_ms_p95": 146.51,
+  "platform": "Windows",
+  "python": "3.13.7",
+  "peak_python_heap_mb": 7.57,
+  "measurement_note": "Local server and test clients share one process; traced Python heap is not total RSS. Signup and admin-write bursts increased for provisioning; message and connection limits use defaults."
+}

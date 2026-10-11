@@ -1,0 +1,26 @@
+# Adapt paths and create the lanmsg system user before installing this unit.
+[Unit]
+Description=LANmsg chat server
+After=network.target
+
+[Service]
+Type=simple
+User=lanmsg
+Group=lanmsg
+WorkingDirectory=/opt/lanmsg
+StateDirectory=lanmsg
+Environment=LANMSG_DB=/var/lib/lanmsg/lanmsg.db
+ExecStart=/opt/lanmsg/.venv/bin/lanmsg --host 127.0.0.1 --port 8000 --max-connections 100 --max-http 32
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+MemoryMax=512M
+CPUQuota=100%
+LimitNOFILE=2048
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

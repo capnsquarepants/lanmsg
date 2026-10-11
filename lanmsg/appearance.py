@@ -22,4 +22,4 @@ class Appearance(BaseModel):
     font_size: int = Field(default=14, ge=12, le=20)
     line_height: float = Field(default=1.6, ge=1.3, le=2.2)
     row_spacing: int = Field(default=3, ge=0, le=10)
-    corner_radius: int = Field(default=6, ge=0, le=16)
+    corner_radius: int = Field(default=0, ge=0, le=16)
