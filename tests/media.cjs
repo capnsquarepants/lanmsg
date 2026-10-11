@@ -24,6 +24,7 @@ const context = vm.createContext({URL, location:{protocol:'http:'}, document:{
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../lanmsg/static/media.js'),'utf8'),context);
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../lanmsg/static/mentions.js'),'utf8'),context);
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../lanmsg/static/attachments.js'),'utf8'),context);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../lanmsg/static/roles.js'),'utf8'),context);
 context.openUser = () => {};
 context.scheduleViewportRead = () => {};
 context.readBoundary = null; context.hasNewer = false; context.selecting = false;

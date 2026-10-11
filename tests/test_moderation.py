@@ -66,7 +66,7 @@ def test_bans_revoke_sessions_block_login_and_preserve_messages(tmp_path):
     with TestClient(create_app(path)) as owner:
         owner.post('/api/login', headers=HEADERS, json={'username': 'owner', 'password': 'a long test password'})
         entries = owner.get('/api/admin/audit').json()['entries']
-        assert any(row['action'] == 'member.ban' and row['detail'] == 'Repeated spam' for row in entries)
+        assert any(row['action'] == 'member.ban' and row['detail'] == 'user -> banned: Repeated spam' for row in entries)
 
 
 def test_admin_cannot_moderate_other_admins_and_audit_pagination(tmp_path):

@@ -18,7 +18,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from .appearance import Appearance
@@ -26,6 +26,7 @@ from .attachments import ID_PATTERN, attachment_directory, clean_filename, previ
 from .previews import PreviewError, PreviewService
 from .reliability import AdmissionMiddleware, Hub, Limits, RateLimiter
 from .settings import AppSettings, LIMIT_FIELDS
+from .roles import can_change_role, identity
 
 STATIC = Path(__file__).parent / "static"
 
@@ -80,7 +81,24 @@ class ReadPosition(BaseModel):
 
 class AdminRole(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    admin: bool
+    role: Literal["admin", "moderator", "user", "banned"] | None = None
+    admin: bool | None = None  # Compatibility with older clients.
+    reason: str = Field(default="", max_length=300)
+
+    @model_validator(mode="after")
+    def one_role(self):
+        if (self.role is None) == (self.admin is None):
+            raise ValueError("Supply exactly one role")
+        if any(unicodedata.category(char).startswith("C") for char in self.reason):
+            raise ValueError("Use a reason without control characters")
+        self.reason = self.reason.strip()
+        return self
+
+
+class OwnershipTransfer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_id: int = Field(ge=1)
+    password: str = Field(min_length=10, max_length=128)
 
 
 class BanUpdate(BaseModel):
@@ -182,6 +200,11 @@ def create_app(database=None, limits=None):
         for column, declaration in (("admin", "INTEGER NOT NULL DEFAULT 0"), ("banned", "INTEGER NOT NULL DEFAULT 0"), ("ban_reason", "TEXT NOT NULL DEFAULT ''"), ("notifications", "TEXT NOT NULL DEFAULT 'mentions'"), ("desktop_notifications", "INTEGER NOT NULL DEFAULT 0"), ("bio", "TEXT NOT NULL DEFAULT ''"), ("nickname_color", "TEXT NOT NULL DEFAULT 'default'"), ("media_previews", "INTEGER NOT NULL DEFAULT 0")):
             if column not in user_columns:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {column} {declaration}")
+        if "role" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('admin','moderator','user','banned'))")
+            conn.execute("UPDATE users SET role=CASE WHEN owner=1 THEN 'admin' WHEN banned=1 THEN 'banned' WHEN admin=1 THEN 'admin' ELSE 'user' END")
+            conn.execute("UPDATE users SET admin=(role='admin'),banned=(role='banned')")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS single_server_owner ON users(owner) WHERE owner=1")
         if "media_preview_override" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN media_preview_override INTEGER")
             # Preserve existing explicit choices. New accounts inherit the server default.
@@ -296,10 +319,10 @@ def create_app(database=None, limits=None):
 
     def user(token):
         with db() as conn:
-            row = conn.execute("SELECT users.id,username,display_name,owner,admin FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>? AND users.banned=0", (token or "", time.time())).fetchone()
+            row = conn.execute("SELECT users.id,username,display_name,owner,role FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>? AND users.role!='banned'", (token or "", time.time())).fetchone()
         if not row:
             raise HTTPException(401, "Please sign in")
-        return dict(row)
+        return identity(row)
 
     def auth(request):
         # A same-origin header prevents cross-site form requests with session cookies.
@@ -339,6 +362,12 @@ def create_app(database=None, limits=None):
             raise HTTPException(403, "Administrator access required")
         return member
 
+    def staff(request):
+        member = auth(request)
+        if member["role"] not in ("admin", "moderator"):
+            raise HTTPException(403, "Moderator access required")
+        return member
+
     def require_admin(conn, member, owner_only=False):
         # Recheck inside the write transaction: a concurrent demotion cannot race a mutation.
         row = require_active(conn, member)
@@ -346,10 +375,10 @@ def create_app(database=None, limits=None):
             raise HTTPException(403, "Server owner access required" if owner_only else "Administrator access required")
 
     def require_active(conn, member):
-        row = conn.execute("SELECT owner,admin,banned FROM users WHERE id=?", (member["id"],)).fetchone()
-        if not row or row["banned"]:
+        row = conn.execute("SELECT id,owner,role FROM users WHERE id=?", (member["id"],)).fetchone()
+        if not row or row["role"] == "banned":
             raise HTTPException(401, "Please sign in")
-        return row
+        return {**dict(row), "admin": row["role"] == "admin", "moderator": row["role"] == "moderator"}
 
     def audit(conn, member, action, target_id=None, detail=""):
         conn.execute("INSERT INTO audit_log(created,actor_id,action,target_id,detail) VALUES(?,?,?,?,?)", (time.time(), member["id"], action, target_id, detail))
@@ -362,15 +391,15 @@ def create_app(database=None, limits=None):
 
     @app.get("/api/admin/console")
     def console(request: Request):
-        admin(request)
+        member = staff(request)
         with db() as conn:
             stats = {table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in ("users", "channels", "messages")}
             channels = [dict(row) for row in conn.execute("SELECT * FROM channels ORDER BY id")]
-            invites = [dict(row) for row in conn.execute("SELECT token,expires FROM invites WHERE expires>? ORDER BY expires DESC", (time.time(),))]
+            invites = [dict(row) for row in conn.execute("SELECT token,expires FROM invites WHERE expires>? ORDER BY expires DESC", (time.time(),))] if member["role"] == "admin" else []
         stats["connections"] = len(hub.peers)
         stats["free_disk_bytes"] = shutil.disk_usage(path.parent).free
         stats["database_bytes"] = path.stat().st_size
-        return {**settings_response(), "stats": stats, "channels": channels, "invites": invites}
+        return {**(settings_response() if member["role"] == "admin" else {}), "stats": stats, "channels": channels, "invites": invites}
 
     @app.put("/api/admin/settings")
     def update_settings(body: AppSettings, request: Request):
@@ -401,48 +430,30 @@ def create_app(database=None, limits=None):
 
     @app.get("/api/admin/members")
     def moderation_members(request: Request):
-        admin(request)
+        staff(request)
         with db() as conn:
-            return [dict(row) for row in conn.execute("SELECT id,username,display_name,owner,admin,banned,ban_reason FROM users ORDER BY owner DESC,admin DESC,username COLLATE NOCASE")]
+            return [dict(row) for row in conn.execute("SELECT id,username,display_name,owner,role,admin,banned,ban_reason FROM users ORDER BY owner DESC,role,username COLLATE NOCASE")]
 
-    @app.put("/api/admin/members/{user_id}/role")
-    def change_admin(user_id: int, body: AdminRole, request: Request):
-        member = owner(request)
-        with db() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            require_admin(conn, member, owner_only=True)
-            target = conn.execute("SELECT id,owner,admin,banned FROM users WHERE id=?", (user_id,)).fetchone()
-            if not target:
-                raise HTTPException(404, "User not found")
-            if target["owner"]:
-                raise HTTPException(403, "The owner's role cannot be changed")
-            if body.admin and target["banned"]:
-                raise HTTPException(409, "Unban this account before granting admin access")
-            if bool(target["admin"]) != body.admin:
-                conn.execute("UPDATE users SET admin=? WHERE id=?", (body.admin, user_id))
-                audit(conn, member, "admin.grant" if body.admin else "admin.revoke", user_id)
-        hub.publish({"type": "permissions", "user_id": user_id})
-        return {"ok": True}
-
-    @app.put("/api/admin/members/{user_id}/ban")
-    def change_ban(user_id: int, body: BanUpdate, request: Request):
-        member = admin(request)
+    def set_role(user_id, role, reason, request, legacy=False, banned=None):
+        member = staff(request)
         tokens = []
         with db() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            require_admin(conn, member)
-            target = conn.execute("SELECT id,owner,admin,banned FROM users WHERE id=?", (user_id,)).fetchone()
+            actor = require_active(conn, member)
+            target = conn.execute("SELECT id,owner,role FROM users WHERE id=?", (user_id,)).fetchone()
             if not target:
                 raise HTTPException(404, "User not found")
-            if target["owner"] or target["id"] == member["id"]:
-                raise HTTPException(403, "You cannot ban yourself or the server owner")
-            actor = require_active(conn, member)
-            if target["admin"] and not actor["owner"]:
-                raise HTTPException(403, "Only the owner can moderate another admin")
-            if bool(target["banned"]) != body.banned:
-                conn.execute("UPDATE users SET banned=?,ban_reason=? WHERE id=?", (body.banned, body.reason if body.banned else "", user_id))
-                audit(conn, member, "member.ban" if body.banned else "member.unban", user_id, body.reason)
-            if body.banned:
+            if banned is not None:
+                role = "banned" if banned else ("user" if target["role"] == "banned" else target["role"])
+            if not can_change_role(actor, target, role):
+                raise HTTPException(403, "You cannot change this account's role")
+            if target["role"] == "banned" and (role in ("admin", "moderator") or legacy):
+                raise HTTPException(409, "Unban this account to User before granting staff access")
+            if target["role"] != role:
+                conn.execute("UPDATE users SET role=?,admin=?,banned=?,ban_reason=? WHERE id=?", (role, role == "admin", role == "banned", reason if role == "banned" else "", user_id))
+                action = "member.ban" if role == "banned" else "member.unban" if target["role"] == "banned" else "role.update"
+                audit(conn, member, action, user_id, (target["role"] + " -> " + role) + (": " + reason if reason else ""))
+            if role == "banned":
                 tokens = [row[0] for row in conn.execute("SELECT token FROM sessions WHERE user_id=?", (user_id,))]
                 conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
         for token in tokens:
@@ -450,13 +461,45 @@ def create_app(database=None, limits=None):
         hub.publish({"type": "permissions", "user_id": user_id})
         return {"ok": True}
 
+    @app.put("/api/admin/members/{user_id}/role")
+    def change_role(user_id: int, body: AdminRole, request: Request):
+        role = body.role if body.role is not None else "admin" if body.admin else "user"
+        return set_role(user_id, role, body.reason, request, legacy=body.admin is not None)
+
+    @app.put("/api/admin/members/{user_id}/ban")
+    def change_ban(user_id: int, body: BanUpdate, request: Request):
+        # Retain the old endpoint, using the same role hierarchy as the new selector.
+        return set_role(user_id, None, body.reason, request, banned=body.banned)
+
+    @app.post("/api/admin/ownership")
+    def transfer_ownership(body: OwnershipTransfer, request: Request):
+        member = owner(request)
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_admin(conn, member, owner_only=True)
+            current = conn.execute("SELECT salt,password FROM users WHERE id=?", (member["id"],)).fetchone()
+            candidate = hashlib.scrypt(body.password.encode(), salt=bytes.fromhex(current["salt"]), n=16384, r=8, p=1).hex()
+            if not hmac.compare_digest(current["password"], candidate):
+                raise HTTPException(403, "Incorrect password")
+            target = conn.execute("SELECT id,owner,role FROM users WHERE id=?", (body.user_id,)).fetchone()
+            if not target:
+                raise HTTPException(404, "User not found")
+            if target["owner"] or target["role"] != "admin":
+                raise HTTPException(409, "Choose another active Admin to receive ownership")
+            conn.execute("UPDATE users SET owner=0 WHERE id=?", (member["id"],))
+            conn.execute("UPDATE users SET owner=1 WHERE id=?", (body.user_id,))
+            audit(conn, member, "ownership.transfer", body.user_id)
+        hub.publish({"type": "permissions", "user_id": member["id"]})
+        hub.publish({"type": "permissions", "user_id": body.user_id})
+        return {"ok": True}
+
     @app.get("/api/admin/audit")
     def audit_history(request: Request, before: int = 9223372036854775807):
-        admin(request)
+        staff(request)
         with db() as conn:
             rows = [dict(row) for row in conn.execute("""SELECT a.*,u.username AS actor_username,t.username AS target_username
                 FROM audit_log a LEFT JOIN users u ON u.id=a.actor_id
-                LEFT JOIN users t ON t.id=a.target_id AND a.action IN ('admin.grant','admin.revoke','member.ban','member.unban')
+                LEFT JOIN users t ON t.id=a.target_id AND a.action IN ('admin.grant','admin.revoke','member.ban','member.unban','role.update','ownership.transfer')
                 WHERE a.id<? ORDER BY a.id DESC LIMIT 51""", (before,))]
         return {"entries": rows[:50], "next_before": rows[49]["id"] if len(rows) > 50 else None}
 
@@ -498,20 +541,20 @@ def create_app(database=None, limits=None):
                 salt = secrets.token_hex(16)
                 password = hashlib.scrypt(body.password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1).hex()
                 try:
-                    conn.execute("INSERT INTO users(username,display_name,salt,password,owner,read_start_id) VALUES(?,?,?,?,?,(SELECT value FROM message_sequence WHERE id=1))", (body.username, body.username, salt, password, owner))
+                    conn.execute("INSERT INTO users(username,display_name,salt,password,owner,role,admin,read_start_id) VALUES(?,?,?,?,?,?,?,(SELECT value FROM message_sequence WHERE id=1))", (body.username, body.username, salt, password, owner, "admin" if owner else "user", int(owner)))
                 except sqlite3.IntegrityError:
                     raise HTTPException(409, "That username is taken")
                 conn.execute("DELETE FROM invites WHERE token=?", (body.invite,))
             row = conn.execute("SELECT * FROM users WHERE username=?", (body.username,)).fetchone()
             if not row or not hmac.compare_digest(row["password"], hashlib.scrypt(body.password.encode(), salt=bytes.fromhex(row["salt"]), n=16384, r=8, p=1).hex()):
                 raise HTTPException(401, "Incorrect username or password")
-            if row["banned"]:
+            if row["role"] == "banned":
                 raise HTTPException(403, "This account is banned")
             token = secrets.token_urlsafe(32)
             conn.execute("INSERT INTO sessions VALUES(?,?,?)", (token, row["id"], time.time() + 30 * 86400))
             conn.execute("DELETE FROM sessions WHERE user_id=? AND token NOT IN (SELECT token FROM sessions WHERE user_id=? ORDER BY expires DESC LIMIT 10)", (row["id"], row["id"]))
             response.set_cookie("session", token, httponly=True, samesite="strict", secure=request.url.scheme == "https", max_age=30 * 86400)
-            return {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "owner": row["owner"], "admin": row["admin"]}
+            return identity(row)
 
     @app.post("/api/session/logout")
     def logout(request: Request, response: Response):
@@ -535,10 +578,10 @@ def create_app(database=None, limits=None):
             conn.execute("UPDATE users SET display_name=? WHERE id=?", (body.display_name, member["id"]))
         profile = {"id": member["id"], "username": member["username"], "display_name": body.display_name}
         hub.publish({"type": "profile", "profile": profile})
-        return {**profile, "owner": member["owner"], "admin": member["admin"]}
+        return {**member, **profile}
 
     def profile_row(conn, user_id):
-        row = conn.execute("SELECT id,username,display_name,bio,nickname_color FROM users WHERE id=?", (user_id,)).fetchone()
+        row = conn.execute("SELECT id,username,display_name,bio,nickname_color,role,owner FROM users WHERE id=?", (user_id,)).fetchone()
         if not row:
             raise HTTPException(404, "User not found")
         return dict(row)
@@ -566,7 +609,7 @@ def create_app(database=None, limits=None):
     def member_directory(request: Request):
         auth(request)
         with db() as conn:
-            return [dict(row) for row in conn.execute("SELECT id,username,display_name FROM users WHERE banned=0 ORDER BY username COLLATE NOCASE")]
+            return [dict(row) for row in conn.execute("SELECT id,username,display_name,role,owner FROM users WHERE role!='banned' ORDER BY username COLLATE NOCASE")]
 
     def attachment_info(row):
         return {"id": row["id"], "filename": row["filename"], "size": row["size"], "media_type": row["media_type"], "url": "/api/attachments/" + row["id"]}
@@ -768,7 +811,7 @@ def create_app(database=None, limits=None):
         return {"invite": token}
 
     def public_message(row, conn):
-        result = {key: row[key] for key in ("id", "channel_id", "user_id", "created", "username", "display_name", "nickname_color", "version", "edited", "deleted")}
+        result = {key: row[key] for key in ("id", "channel_id", "user_id", "created", "username", "display_name", "nickname_color", "author_role", "version", "edited", "deleted")}
         result["content"] = "" if row["deleted"] is not None else row["content"]
         result["mentions"] = []
         result["attachments"] = [] if row["deleted"] is not None else [attachment_info(file) for file in conn.execute("SELECT * FROM attachments WHERE message_id=? ORDER BY id", (row["id"],))]
@@ -777,7 +820,7 @@ def create_app(database=None, limits=None):
         return result
 
     def message_row(conn, message_id):
-        row = conn.execute("SELECT messages.*,users.username,users.display_name,users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE messages.id=?", (message_id,)).fetchone()
+        row = conn.execute("SELECT messages.*,users.username,users.display_name,users.nickname_color,users.role AS author_role FROM messages JOIN users ON users.id=user_id WHERE messages.id=?", (message_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Message not found")
         return row
@@ -836,7 +879,7 @@ def create_app(database=None, limits=None):
     def mentions_inbox(request: Request, before: int = 9223372036854775807, unread_only: bool = True):
         member = auth(request)
         with db() as conn:
-            rows = list(conn.execute("""SELECT m.*,u.username,u.display_name,u.nickname_color,c.name AS channel_name
+            rows = list(conn.execute("""SELECT m.*,u.username,u.display_name,u.nickname_color,u.role AS author_role,c.name AS channel_name
                 FROM message_mentions mm JOIN messages m ON m.id=mm.message_id
                 JOIN users u ON u.id=m.user_id JOIN channels c ON c.id=m.channel_id
                 JOIN users me ON me.id=mm.user_id LEFT JOIN channel_reads r ON r.user_id=me.id AND r.channel_id=m.channel_id
@@ -857,7 +900,7 @@ def create_app(database=None, limits=None):
                 raise HTTPException(404, "Message no longer exists in this channel")
             if around is None:
                 around = conn.execute("SELECT min(id) FROM messages WHERE channel_id=? AND id>? AND deleted IS NULL AND user_id!=?", (channel_id, position, member["id"])).fetchone()[0]
-            select = "SELECT m.*,u.username,u.display_name,u.nickname_color FROM messages m JOIN users u ON u.id=m.user_id WHERE m.channel_id=?"
+            select = "SELECT m.*,u.username,u.display_name,u.nickname_color,u.role AS author_role FROM messages m JOIN users u ON u.id=m.user_id WHERE m.channel_id=?"
             if around is None:
                 rows = list(conn.execute(select + " ORDER BY m.id DESC LIMIT 50", (channel_id,)))[::-1]
             else:
@@ -874,8 +917,8 @@ def create_app(database=None, limits=None):
         auth(request)
         with db() as conn:
             if after is not None:
-                return [public_message(r, conn) for r in conn.execute("SELECT messages.*,users.username,users.display_name,users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id>? ORDER BY messages.id LIMIT 50", (channel_id, after))]
-            return [public_message(r, conn) for r in conn.execute("SELECT messages.*, users.username, users.display_name, users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id<? ORDER BY messages.id DESC LIMIT 50", (channel_id, before))][::-1]
+                return [public_message(r, conn) for r in conn.execute("SELECT messages.*,users.username,users.display_name,users.nickname_color,users.role AS author_role FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id>? ORDER BY messages.id LIMIT 50", (channel_id, after))]
+            return [public_message(r, conn) for r in conn.execute("SELECT messages.*, users.username, users.display_name, users.nickname_color,users.role AS author_role FROM messages JOIN users ON users.id=user_id WHERE channel_id=? AND messages.id<? ORDER BY messages.id DESC LIMIT 50", (channel_id, before))][::-1]
 
     @app.post("/api/channels/{channel_id}/messages")
     def send(channel_id: int, body: Message, request: Request):
@@ -899,7 +942,7 @@ def create_app(database=None, limits=None):
                     next_id = conn.execute("UPDATE message_sequence SET value=value+1 WHERE id=1 RETURNING value").fetchone()[0]
                     conn.execute("INSERT INTO messages(id,channel_id,user_id,content,nonce,created) VALUES(?,?,?,?,?,?)", (next_id, channel_id, member["id"], body.content.strip(), body.nonce, time.time()))
                     conn.executemany("UPDATE attachments SET message_id=? WHERE id=?", [(next_id, attachment_id) for attachment_id in body.attachments])
-                row = conn.execute("SELECT messages.*,users.username,users.display_name,users.nickname_color FROM messages JOIN users ON users.id=user_id WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone()
+                row = conn.execute("SELECT messages.*,users.username,users.display_name,users.nickname_color,users.role AS author_role FROM messages JOIN users ON users.id=user_id WHERE user_id=? AND nonce=?", (member["id"], body.nonce)).fetchone()
                 if row["channel_id"] != channel_id:
                     raise HTTPException(409, "This send identifier belongs to another channel")
                 if inserted:
@@ -943,8 +986,10 @@ def create_app(database=None, limits=None):
                 conn.execute("BEGIN IMMEDIATE")
                 actor = require_active(conn, member)
                 row = message_row(conn, message_id)
-                if row["user_id"] != member["id"] and not (actor["owner"] or actor["admin"]):
-                    raise HTTPException(403, "Only the author or an admin can delete a message")
+                if row["user_id"] != member["id"]:
+                    author = conn.execute("SELECT role FROM users WHERE id=?", (row["user_id"],)).fetchone()
+                    if not actor["admin"] and not (actor["moderator"] and author["role"] in ("user", "banned")):
+                        raise HTTPException(403, "Your role cannot delete this message")
                 if row["deleted"] is None:
                     changed = time.time()
                     conn.execute("INSERT INTO message_versions VALUES(?,?,?,?,?,?)", (message_id, row["version"], row["content"], changed, member["id"], "delete"))

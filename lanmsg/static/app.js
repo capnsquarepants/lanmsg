@@ -218,6 +218,7 @@ function adminNotice(message, section) { if(activeAdminSection === section) $('a
 function selectAdminSection(section) {
   if(savingAdmin || savingTheme) return;
   editingTheme = false; applyTheme(savedTheme); clearAdminFeedback();
+  if(!Roles.tabs(member).includes(section)) section = Roles.role(member) === 'moderator' ? 'members' : 'settings';
   activeAdminSection = section; $('appearance-error').textContent = '';
   for(const tab of document.querySelectorAll('[data-admin-section]')) {
     const active = section === tab.dataset.adminSection;
@@ -243,7 +244,7 @@ function showAdminSettings(data, fill = true) {
 }
 async function refreshAdmin(fill = true) {
   const data = await api('/admin/console');
-  showAdminSettings(data, fill);
+  if(data.settings) showAdminSettings(data, fill);
   $('admin-stats').replaceChildren(...['users','channels','messages','connections'].map(key => {
     const item = document.createElement('span'); item.textContent = `${data.stats[key]} ${key}`; return item;
   }));
@@ -260,7 +261,7 @@ async function refreshAdmin(fill = true) {
   if(!data.invites.length) { const item = document.createElement('li'); item.textContent = 'No active invites.'; $('admin-invite-list').append(item); }
 }
 $('admin-open').onclick = async () => {
-  try { await Promise.all([refreshAdmin(), loadAppearance()]); selectAdminSection('settings'); $('admin-dialog').showModal(); }
+  try { await Promise.all([refreshAdmin(), loadAppearance()]); refreshAdminAccess(); selectAdminSection(Roles.role(member) === 'moderator' ? 'members' : 'settings'); $('admin-dialog').showModal(); }
   catch(error) { showError(error); }
 };
 $('admin-close').onclick = () => { if(!savingAdmin && !savingTheme) $('admin-dialog').close(); };
@@ -304,7 +305,7 @@ function refreshIdentity() {
 }
 function showUser(profile) {
   $('user-display-name').textContent = profile.display_name;
-  $('user-handle').textContent = '@' + profile.username;
+  $('user-handle').textContent = '@' + profile.username; $('user-role').textContent = Roles.label(profile);
   $('user-display-name').style.color = nicknameColor(profile);
   $('user-bio').textContent = profile.bio || ''; $('user-bio').hidden = !profile.bio;
 }
@@ -471,39 +472,59 @@ function endSession() {
   registering = false; authMode(); $('auth-error').textContent = 'Your session ended. Sign in again, or contact the server owner if your account was banned.';
 }
 function refreshAdminAccess() {
-  const allowed = member && (member.owner || member.admin); $('admin').hidden = !allowed;
+  const allowed = member && Roles.staff(member); $('admin').hidden = !allowed;
+  $('admin-open').textContent = Roles.role(member) === 'moderator' ? 'Moderation console' : 'Admin console';
+  $('admin-title').textContent = $('admin-open').textContent;
+  for(const tab of document.querySelectorAll('[data-admin-section]')) {
+    const visible = Roles.tabs(member).includes(tab.dataset.adminSection); tab.hidden = !visible;
+    if(!visible) $('admin-section-' + tab.dataset.adminSection).hidden = true;
+  }
   if(!allowed && $('admin-dialog').open) $('admin-dialog').close();
+  else if(allowed && $('admin-dialog').open && !Roles.tabs(member).includes(activeAdminSection)) selectAdminSection('members');
+  if(!member?.owner && $('ownership-dialog').open) $('ownership-dialog').close();
 }
-let auditCursor = null, auditRequest = 0, membersRequest = 0;
+let auditCursor = null, auditRequest = 0, membersRequest = 0, ownershipTarget = null, transferring = false;
 async function refreshMembers() {
   const request = ++membersRequest, users = await api('/admin/members');
-  if(request !== membersRequest || !member || !(member.owner || member.admin)) return;
+  if(request !== membersRequest || !member || !Roles.staff(member)) return;
   $('admin-members').replaceChildren(...users.map(user => {
     const item = document.createElement('article'), name = document.createElement('p'), actions = document.createElement('div');
-    name.textContent = (user.display_name || user.username) + ' (@' + user.username + ') / ' + (user.owner ? 'Owner' : user.admin ? 'Admin' : 'Member') + (user.banned ? ' / Banned' : '');
+    name.textContent = (user.display_name || user.username) + ' (@' + user.username + ') / ' + Roles.label(user);
     actions.className = 'moderation-actions';
-    const mutate = async (button,path,body) => {
-      button.disabled = true; clearAdminFeedback();
-      try { await api(path,{method:'PUT',body:JSON.stringify(body)}); await refreshMembers(); adminNotice('Member updated.','members'); }
-      catch(error) { adminError(error,'members'); button.disabled = false; }
-    };
-    if(!user.owner && member.owner) {
-      const role = messageAction(user.admin ? 'Remove admin' : 'Make admin',() => {
-        if(!confirm((user.admin ? 'Remove admin access from @' : 'Grant admin access to @') + user.username + '?')) return;
-        mutate(role,'/admin/members/' + user.id + '/role',{admin:!user.admin});
-      }); role.disabled = !!user.banned && !user.admin; actions.append(role);
+    const choices = Roles.choices(member,user);
+    if(choices.length) {
+      const select = document.createElement('select'); select.setAttribute('aria-label','Role for @' + user.username);
+      for(const role of choices) { const option = document.createElement('option'); option.value = role; option.textContent = Roles.label({role}); select.append(option); }
+      select.value = user.role;
+      const apply = messageAction('Set role',async () => {
+        if(select.value === user.role) return;
+        if(!confirm('Change @' + user.username + ' to ' + Roles.label({role:select.value}) + '?')) return;
+        apply.disabled = true; select.disabled = true; clearAdminFeedback();
+        try { await api('/admin/members/' + user.id + '/role',{method:'PUT',body:JSON.stringify({role:select.value,reason:select.value === 'banned' ? $('ban-reason').value : ''})}); await refreshMembers(); adminNotice('Role updated.','members'); }
+        catch(error) { adminError(error,'members'); apply.disabled = false; select.disabled = false; }
+      }); actions.append(select,apply);
     }
-    if(!user.owner && user.id !== member.id && (member.owner || !user.admin)) {
-      const ban = messageAction(user.banned ? 'Unban' : 'Ban',() => {
-        if(!confirm((user.banned ? 'Unban @' : 'Ban @') + user.username + (user.banned ? '?' : ' and end their active sessions?'))) return;
-        mutate(ban,'/admin/members/' + user.id + '/ban',{banned:!user.banned,reason:$('ban-reason').value});
-      }); actions.append(ban);
-    }
+    if(member.owner && !user.owner && user.role === 'admin') actions.append(messageAction('Transfer ownership',() => {
+      ownershipTarget = user.id; $('ownership-target').textContent = 'Transfer ownership to @' + user.username + '?';
+      $('ownership-password').value = ''; $('ownership-error').textContent = ''; $('ownership-dialog').showModal();
+    }));
     item.append(name);
-    if(user.banned && user.ban_reason) { const reason = document.createElement('p'); reason.textContent = user.ban_reason; item.append(reason); }
+    if(user.role === 'banned' && user.ban_reason) { const reason = document.createElement('p'); reason.textContent = user.ban_reason; item.append(reason); }
     item.append(actions); return item;
   }));
 }
+$('ownership-close').onclick = () => { if(!transferring) $('ownership-dialog').close(); };
+$('ownership-dialog').oncancel = event => { if(transferring) event.preventDefault(); };
+$('ownership-dialog').onclose = () => { $('ownership-password').value = ''; ownershipTarget = null; };
+$('ownership-form').onsubmit = async event => {
+  event.preventDefault(); if(transferring || !ownershipTarget) return;
+  transferring = true; $('ownership-submit').disabled = true; $('ownership-error').textContent = '';
+  try {
+    await api('/admin/ownership',{method:'POST',body:JSON.stringify({user_id:ownershipTarget,password:$('ownership-password').value})});
+    member = {...member,...await api('/me')}; $('ownership-dialog').close(); refreshAdminAccess(); await refreshMembers(); render(); adminNotice('Ownership transferred.','members');
+  } catch(error) { $('ownership-error').textContent = error.message; }
+  finally { transferring = false; $('ownership-submit').disabled = false; }
+};
 async function loadAudit(before = null) {
   const request = ++auditRequest; if(before === null) $('audit-results').replaceChildren(); $('audit-more').disabled = true;
   try {
@@ -607,7 +628,7 @@ function render() {
     }
     if(!divided && readBoundary !== null && m.id > readBoundary && !m.deleted && m.user_id !== member?.id) { rows.push(unreadDivider); divided = true; }
     const profile = {...m, ...profileUpdates.get(m.user_id)}, displayName = profile.display_name || profile.username;
-    const signature = JSON.stringify([m.version, m.content, m.deleted, m.edited, profile.display_name, profile.username, profile.nickname_color, mediaPreviewsEnabled, member?.owner, member?.admin, m.mentions, m.attachments]);
+    const signature = JSON.stringify([m.version, m.content, m.deleted, m.edited, profile.display_name, profile.username, profile.nickname_color, profile.role, m.author_role, mediaPreviewsEnabled, member?.owner, member?.role, m.mentions, m.attachments]);
     const cached = messageRows.get(m.id);
     if(editingMessage !== m.id && cached?.signature === signature) { rows.push(cached.item); continue; }
     const item = document.createElement('article'); item.className = 'message' + (m.user_id === member?.id ? ' self' : '');
@@ -634,8 +655,8 @@ function render() {
       editingMessage = m.id; editDraft = m.content; editVersion = m.version; render();
       $('message-edit-' + m.id)?.focus();
     }));
-    if(!m.deleted && (m.user_id === member?.id || member?.owner || member?.admin)) actions.append(messageIcon('Delete message', 'trash', () => deleteMessage(m.id)));
-    if(member?.owner || member?.admin) actions.append(messageIcon('View message history', 'clock-rotate-right', () => openMessageHistory(m.id)));
+    if(!m.deleted && Roles.canDelete(member,{id:m.user_id,role:profile.role || m.author_role})) actions.append(messageIcon('Delete message', 'trash', () => deleteMessage(m.id)));
+    if(Roles.role(member) === 'admin') actions.append(messageIcon('View message history', 'clock-rotate-right', () => openMessageHistory(m.id)));
     if(editingMessage === m.id && !m.deleted) {
       body.replaceChildren();
       const input = document.createElement('textarea'); input.id = 'message-edit-' + m.id; input.value = editDraft; input.maxLength = 4000; input.disabled = savingMessage; input.setAttribute('aria-label','Edit message');
@@ -725,7 +746,7 @@ function connect() {
     if(data.type === 'server_settings') receiveServerSettings(data.settings);
     if(data.type === 'appearance') receiveTheme(data.appearance);
     if(data.type === 'permissions') {
-      api('/users').then(users => { directory = users; }).catch(showError);
+      api('/users').then(users => { directory = users; for(const user of users) profileUpdates.set(user.id,{...profileUpdates.get(user.id),role:user.role,owner:user.owner}); render(); if(viewedUserId) openUser(viewedUserId); }).catch(showError);
       if(data.user_id === member?.id) api('/me').then(profile => { member = {...member,...profile}; refreshAdminAccess(); render(); }).catch(showError);
       if($('admin-dialog').open && activeAdminSection === 'members') refreshMembers().catch(error => adminError(error,'members'));
     }
@@ -747,7 +768,7 @@ function connect() {
 }
 async function start() {
   const profile = await api('/me/profile'); member = {...member, ...profile}; updateMediaPreference(profile.media_previews);
-  $('auth').hidden = true; $('chat').hidden = false; $('admin').hidden = !(member.owner || member.admin);
+  $('auth').hidden = true; $('chat').hidden = false; refreshAdminAccess();
   refreshIdentity();
   directory = await api('/users'); seenEvents.clear();
   await loadChannels();

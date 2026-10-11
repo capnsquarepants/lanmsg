@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LANmsg</title><link rel="stylesheet" href="/static/style.css"><script src="/static/channel-state.js" defer></script><script src="/static/media.js" defer></script><script src="/static/mentions.js" defer></script><script src="/static/attachments.js" defer></script><script src="/static/app.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LANmsg</title><link rel="stylesheet" href="/static/style.css"><script src="/static/channel-state.js" defer></script><script src="/static/media.js" defer></script><script src="/static/mentions.js" defer></script><script src="/static/attachments.js" defer></script><script src="/static/roles.js" defer></script><script src="/static/app.js" defer></script></head>
 <body>
 <section id="auth" class="welcome">
   <form id="login"><div class="brand"><span class="brand-mark">#</span><span>LANmsg</span></div><h1>A place to talk.</h1><p id="auth-hint">Sign in to your community.</p>
@@ -53,7 +53,7 @@
   </section>
   <section id="admin-section-channels" hidden><h3>Text channels</h3><ul id="admin-channel-list" class="admin-list"></ul><form id="admin-channel-form" class="admin-inline-form"><label>Channel name<input id="admin-channel-name" required maxlength="32" pattern="[a-z0-9_-]+" placeholder="e.g. off-topic"></label><button id="add-channel">Create channel</button></form></section>
   <section id="admin-section-invites" hidden><h3>Invites</h3><p class="admin-help">Single-use codes expire after seven days. Revoking a code prevents it from being used to register.</p><button id="invite-button" type="button">Create invite</button><ul id="admin-invite-list" class="admin-list"></ul></section>
-  <section id="admin-section-members" hidden><h3>Members and bans</h3><p class="admin-help">Only the owner grants admin access. Admins can moderate ordinary members. Bans revoke active sessions; unbanning requires a fresh sign-in.</p><button id="members-refresh" type="button" class="quiet">Refresh members</button><label>Ban reason<input id="ban-reason" maxlength="300" placeholder="Optional reason, visible to admins"></label><div id="admin-members"></div></section>
+  <section id="admin-section-members" hidden><h3>Members and bans</h3><p class="admin-help">Admin, Moderator, User, or Banned. Only the root admin manages Admin access. Moderators act across all channels. Unbanning returns an account to User.</p><button id="members-refresh" type="button" class="quiet">Refresh members</button><label>Ban reason<input id="ban-reason" maxlength="300" placeholder="Optional reason, visible to admins"></label><div id="admin-members"></div></section>
   <section id="admin-section-audit" hidden><h3>Audit log</h3><p class="admin-help">Administrative actions, bans, role changes, and message deletions. Message content and invite codes are omitted.</p><button id="audit-refresh" type="button" class="quiet">Refresh audit log</button><div id="audit-results"></div><button id="audit-more" type="button" class="quiet" hidden>Earlier entries</button></section>
   <section id="admin-section-history" hidden>
     <h3>Message history</h3><p class="admin-help">Administrators only. Retained versions and deleted text are never included in ordinary chat responses.</p>
@@ -79,6 +79,7 @@
   </div>
   <p id="admin-error" role="alert"></p><p id="admin-notice" role="status"></p>
 </dialog>
+<dialog id="ownership-dialog" aria-labelledby="ownership-title"><form id="ownership-form"><div class="dialog-heading"><h2 id="ownership-title">Transfer server ownership</h2><button id="ownership-close" type="button" class="quiet">Cancel</button></div><p id="ownership-target"></p><p>The recipient becomes the protected root admin. You remain an Admin, and the new owner can demote or ban your account.</p><label>Your password<input id="ownership-password" type="password" autocomplete="current-password" minlength="10" maxlength="128" required></label><p id="ownership-error" role="alert"></p><div class="dialog-actions"><button id="ownership-submit">Transfer ownership</button></div></form></dialog>
 <dialog id="display-name-dialog" aria-labelledby="display-name-title">
   <form id="display-name-form">
     <div class="dialog-heading"><div><h2 id="display-name-title">Your profile</h2><p>Your identity, appearance, and preferences.</p></div><button id="display-name-close" type="button" class="quiet" aria-label="Close display name editor">✕</button></div>
@@ -93,7 +94,7 @@
   </form>
 </dialog>
 <dialog id="user-dialog" aria-labelledby="user-display-name">
-  <div class="dialog-heading"><div><h2 id="user-display-name"></h2><p id="user-handle"></p></div><button id="user-close" type="button" class="quiet" aria-label="Close user details">✕</button></div>
+  <div class="dialog-heading"><div><h2 id="user-display-name"></h2><p id="user-handle"></p><p id="user-role"></p></div><button id="user-close" type="button" class="quiet" aria-label="Close user details">✕</button></div>
   <p id="user-bio" style="white-space: pre-wrap; overflow-wrap: anywhere" hidden></p>
   <p>The handle uniquely identifies this account, even when display names match.</p>
 </dialog>

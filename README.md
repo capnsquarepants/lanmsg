@@ -316,7 +316,9 @@ Profile notification preferences are private and saved per account: mentions onl
 
 ## Moderation
 
-The owner grants or revokes delegated admin access from **Admin console > Members**. Admins can manage server settings, appearance, channels, invites, ordinary-member bans, deleted-message history, and the audit log. Only the owner can grant admin access or moderate another admin. Nobody can ban the owner or themselves, and the owner role cannot be changed. Permission changes take effect in open clients; every privileged write rechecks permission inside its database transaction.
+There are four exclusive roles: **Admin**, **Moderator**, **User**, and **Banned**. Admins manage settings, appearance, channels, invites, roles below Admin, and retained message history. Global moderators can ban/unban ordinary users, delete their messages across all channels, and view members and the audit log. Moderators cannot manage server settings, moderate other staff, or read retained message history. Banned accounts cannot log in; banning revokes all sessions and removes staff permissions. Unbanning returns the account to User.
+
+The root Admin is the server owner and cannot be demoted or banned. Only the root Admin can promote or demote other Admins. From **Admin console > Members**, the owner can transfer ownership to another active Admin after entering their current password. The former owner remains an Admin and can then be demoted by the new owner. Permission changes take effect in open clients; privileged writes recheck permission inside their database transactions. Existing owner/admin/ban flags migrate automatically to the four roles.
 
 Account bans revoke all sessions and close active sockets. Banned accounts cannot sign in, post, or download authenticated data. Unbanning requires a fresh sign-in. Historical messages remain attributed to the account. Ban reasons are visible only in the admin console and audit log; an account ban does not prevent someone from creating a different account if they obtain a new valid invite.
 

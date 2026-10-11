@@ -1,0 +1,57 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const context = vm.createContext({});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../lanmsg/static/roles.js'),'utf8'),context);
+const roles = context.Roles;
+const root = {id:1,role:'admin',owner:1};
+const admin = {id:2,role:'admin',owner:0};
+const mod = {id:3,role:'moderator',owner:0};
+const user = {id:4,role:'user',owner:0};
+const banned = {id:5,role:'banned',owner:0};
+assert.equal(roles.label(root),'Admin (root)');
+assert.deepEqual(Array.from(roles.tabs(mod)),['members','audit']);
+assert.deepEqual(Array.from(roles.tabs(user)),[]);
+assert.deepEqual(Array.from(roles.choices(root,user)),['admin','moderator','user','banned']);
+assert.deepEqual(Array.from(roles.choices(admin,user)),['moderator','user','banned']);
+assert.deepEqual(Array.from(roles.choices(mod,user)),['user','banned']);
+assert.deepEqual(Array.from(roles.choices(root,banned)),['user','banned']);
+for(const actor of [root,admin,mod,user]) {
+  assert.deepEqual(Array.from(roles.choices(actor,root)),[]);
+  assert.deepEqual(Array.from(roles.choices(actor,actor)),[]);
+}
+assert.equal(roles.canDelete(mod,user),true);
+assert.equal(roles.canDelete(mod,banned),true);
+assert.equal(roles.canDelete(mod,admin),false);
+assert.equal(roles.canDelete(mod,root),false);
+assert.equal(roles.canDelete(user,mod),false);
+assert.equal(roles.canDelete(user,user),true);
+assert.equal(roles.canDelete(admin,mod),true);
+assert.equal(roles.canDelete(mod,{id:6,role:'moderator'}),false);
+assert.equal(roles.canChange(mod,{id:6,role:'moderator',owner:0},'banned'),false);
+const elements = new Map();
+function element(id) {
+  if(!elements.has(id)) elements.set(id,{hidden:false,open:false,textContent:'',close(){this.open=false;}});
+  return elements.get(id);
+}
+const tabs = roles.tabs(root).map(section => ({dataset:{adminSection:section}}));
+context.$ = element;
+context.document = {querySelectorAll:() => tabs};
+context.member = mod;
+context.activeAdminSection = 'settings';
+context.selectAdminSection = section => {context.activeAdminSection = section;};
+element('admin-dialog').open = true;
+element('ownership-dialog').open = true;
+const app = fs.readFileSync(path.join(__dirname,'../lanmsg/static/app.js'),'utf8');
+vm.runInContext(app.slice(app.indexOf('function refreshAdminAccess()'),app.indexOf('let auditCursor =')),context);
+context.refreshAdminAccess();
+assert.equal(context.activeAdminSection,'members');
+assert.equal(element('ownership-dialog').open,false);
+assert.equal(element('admin-open').textContent,'Moderation console');
+for(const tab of tabs) assert.equal(tab.hidden,!['members','audit'].includes(tab.dataset.adminSection));
+context.member = user;
+context.refreshAdminAccess();
+assert.equal(element('admin').hidden,true);
+assert.equal(element('admin-dialog').open,false);
+console.log('Role policy checks passed');

@@ -28,7 +28,7 @@ def test_mentions_match_handles_not_emails_urls_or_display_names(tmp_path):
     with TestClient(create_app(tmp_path / "chat.db")) as client:
         member = register(client).json()
         client.put('/api/me', headers=HEADERS, json={'display_name': 'Alex'})
-        assert client.get('/api/users').json() == [{'id': member['id'], 'username': 'owner', 'display_name': 'Alex'}]
+        assert client.get('/api/users').json() == [{'id': member['id'], 'username': 'owner', 'display_name': 'Alex', 'role': 'admin', 'owner': 1}]
         def send(text, nonce):
             return client.post('/api/channels/1/messages', headers=HEADERS, json={'content': text, 'nonce': nonce}).json()
         message = send('Hello @OWNER, @owner! @Alex @unknown', 'mention')
