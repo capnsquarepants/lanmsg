@@ -347,7 +347,7 @@ async function select(id) {
   ChannelState.save(member.id, id);
   const name = channelList.find(c => c.id === id)?.name || 'general';
   $('channel-title').textContent = '#' + name; $('status-channel').textContent = '#' + name; $('content').placeholder = 'Message #' + name;
-  $('older').hidden = false; await loadChannels();
+  $('older').hidden = true; await loadChannels();
   const history = await api(`/channels/${id}/messages`);
   if (current !== generation) return;
   history.forEach(mergeMessage); render(); $('older').hidden = history.length < 50;
