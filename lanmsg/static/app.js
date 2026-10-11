@@ -185,6 +185,7 @@ function render() {
 }
 async function select(id) {
   channel = id; const current = ++generation; messages.clear(); unread.delete(id);
+  ChannelState.save(member.id, id);
   const name = channelList.find(c => c.id === id)?.name || 'general';
   $('channel-title').textContent = '#' + name; $('status-channel').textContent = '#' + name; $('content').placeholder = 'Message #' + name;
   $('older').hidden = false; await loadChannels();
@@ -231,7 +232,9 @@ function connect() {
 async function start() {
   $('auth').hidden = true; $('chat').hidden = false; $('admin').hidden = !member.owner;
   refreshIdentity();
-  await loadChannels(); await select(channel); connect();
+  await loadChannels();
+  channel = ChannelState.restore(member.id, channelList);
+  await select(channel); connect();
 }
 $('composer').onsubmit = async event => {
   event.preventDefault(); const content = $('content').value.trim(); if(!content) return;

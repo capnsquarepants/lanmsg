@@ -45,6 +45,7 @@ relaunching with a different URL.
 - IRC-inspired compact message rows, timestamps, nicknames, and date separators.
 - Server-wide appearance editor with presets, live preview, and persistent CSS tokens.
 - Editable display names with stable account IDs and unique sign-in handles.
+- Last-channel restoration on refresh, stored separately for each account in this browser.
 
 ## Display names
 
