@@ -16,7 +16,7 @@ def test_profile_management_preferences_and_public_privacy(tmp_path):
         register(guest, 'guest', token)
         initial = owner.get('/api/me/profile').json()
         assert initial['bio'] == '' and initial['nickname_color'] == 'default'
-        assert initial['media_previews'] is False
+        assert initial['media_previews'] is None
         changes = {'display_name':'Alex','bio':'  Hello\n<script>plain text</script>  ', 'nickname_color':'accent','media_previews':True}
         with guest.websocket_connect('/ws', headers={'origin':'http://testserver'}) as socket:
             result = owner.put('/api/me/profile', headers=HEADERS, json=changes)
@@ -30,7 +30,7 @@ def test_profile_management_preferences_and_public_privacy(tmp_path):
         assert public == event['profile']
         assert 'media_previews' not in public
         assert owner.get('/api/me/profile').json()['media_previews'] is True
-        assert guest.get('/api/me/profile').json()['media_previews'] is False
+        assert guest.get('/api/me/profile').json()['media_previews'] is None
         message = owner.post('/api/channels/1/messages', headers=HEADERS, json={'content':'Hi','nonce':'profile-color'}).json()
         assert message['nickname_color'] == 'accent'
         assert 'bio' not in message and 'media_previews' not in message
@@ -68,7 +68,7 @@ def test_existing_accounts_receive_profile_defaults(tmp_path):
     with TestClient(create_app(path)) as owner:
         member = register(owner).json()
     with sqlite3.connect(path) as conn:
-        for column in ('bio','nickname_color','media_previews'):
+        for column in ('bio','nickname_color','media_previews','media_preview_override'):
             conn.execute(f'ALTER TABLE users DROP COLUMN {column}')
     for _ in range(2):
         with TestClient(create_app(path)) as owner:

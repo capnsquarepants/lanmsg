@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LANmsg</title><link rel="stylesheet" href="/static/style.css"><script src="/static/channel-state.js" defer></script><script src="/static/app.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LANmsg</title><link rel="stylesheet" href="/static/style.css"><script src="/static/channel-state.js" defer></script><script src="/static/media.js" defer></script><script src="/static/app.js" defer></script></head>
 <body>
 <section id="auth" class="welcome">
   <form id="login"><div class="brand"><span class="brand-mark">#</span><span>LANmsg</span></div><h1>A place to talk.</h1><p id="auth-hint">Sign in to your community.</p>
@@ -33,6 +33,7 @@
         <label>Server name<input name="server_name" maxlength="64" required></label>
         <label>Description<input name="server_description" maxlength="160"></label>
         <label class="checkbox-label"><input name="registration_enabled" type="checkbox">Allow new accounts with valid invites</label>
+        <label class="checkbox-label"><input name="media_previews" type="checkbox">Enable media previews by default</label><p class="admin-help">Users can override this default in either direction from their profile.</p>
       </fieldset>
       <fieldset><legend>Connection limits · Requires restart</legend><div class="theme-grid">
         <label>Total connections<input name="connections" type="number" min="1" max="1000" required></label>
@@ -80,7 +81,7 @@
     <p id="display-name-help">Names can be shared. Your unique handle and sign-in username stay the same. Earlier messages will show your new name.</p>
     <label>Bio<textarea id="profile-bio" maxlength="160" rows="3" placeholder="A little about you"></textarea></label>
     <label>Nickname color<select id="profile-color"><option value="default">Server default</option><option value="accent">Server accent</option><option value="text">Message text color</option></select></label>
-    <fieldset><legend>Media preferences</legend><label class="checkbox-label"><input id="profile-media-previews" type="checkbox">Allow media previews</label><p class="admin-help">For future image, video, and YouTube previews. Off keeps media as links. No previews are loaded yet.</p></fieldset>
+    <fieldset><legend>Media preferences</legend><label>Media previews<select id="profile-media-previews"><option value="default">Use server setting</option><option value="allow">Always allow</option><option value="deny">Never allow</option></select></label><p class="admin-help">Your choice overrides the server default, including for YouTube embeds. Previews load media from the linked site; videos never autoplay.</p></fieldset>
     <p id="display-name-error" role="alert"></p><div class="dialog-actions"><button id="display-name-cancel" type="button" class="quiet">Cancel</button><button id="display-name-save">Save profile</button></div>
   </form>
 </dialog>

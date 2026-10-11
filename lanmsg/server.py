@@ -70,7 +70,7 @@ class ProfileUpdate(BaseModel):
 class ManagedProfile(ProfileUpdate):
     bio: str = Field(default="", max_length=160)
     nickname_color: Literal["default", "accent", "text"] = "default"
-    media_previews: bool = False
+    media_previews: bool | None = None
 
     @field_validator("bio")
     @classmethod
@@ -123,6 +123,10 @@ def create_app(database=None, limits=None):
         for column, declaration in (("bio", "TEXT NOT NULL DEFAULT ''"), ("nickname_color", "TEXT NOT NULL DEFAULT 'default'"), ("media_previews", "INTEGER NOT NULL DEFAULT 0")):
             if column not in user_columns:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {column} {declaration}")
+        if "media_preview_override" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN media_preview_override INTEGER")
+            # Preserve existing explicit choices. New accounts inherit the server default.
+            conn.execute("UPDATE users SET media_preview_override=media_previews")
         if "expires" not in {row["name"] for row in conn.execute("PRAGMA table_info(invites)")}:
             conn.execute("ALTER TABLE invites ADD COLUMN expires REAL NOT NULL DEFAULT 0")
             conn.execute("UPDATE invites SET expires=?", (time.time() + 7 * 86400,))
@@ -332,14 +336,14 @@ def create_app(database=None, limits=None):
         member = auth(request)
         with db() as conn:
             profile = profile_row(conn, member["id"])
-            enabled = conn.execute("SELECT media_previews FROM users WHERE id=?", (member["id"],)).fetchone()[0]
-        return {**profile, "media_previews": bool(enabled)}
+            enabled = conn.execute("SELECT media_preview_override FROM users WHERE id=?", (member["id"],)).fetchone()[0]
+        return {**profile, "media_previews": None if enabled is None else bool(enabled)}
 
     @app.put("/api/me/profile")
     def save_profile(body: ManagedProfile, request: Request):
         member = auth(request)
         with db() as conn:
-            conn.execute("UPDATE users SET display_name=?,bio=?,nickname_color=?,media_previews=? WHERE id=?", (body.display_name, body.bio, body.nickname_color, body.media_previews, member["id"]))
+            conn.execute("UPDATE users SET display_name=?,bio=?,nickname_color=?,media_preview_override=? WHERE id=?", (body.display_name, body.bio, body.nickname_color, body.media_previews, member["id"]))
             profile = profile_row(conn, member["id"])
         hub.publish({"type": "profile", "profile": profile})
         return {**profile, "media_previews": body.media_previews}

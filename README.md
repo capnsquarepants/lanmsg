@@ -80,11 +80,26 @@ and choose a nickname color from the server default, accent, or text color.
 These choices follow the server theme; arbitrary CSS and uploads are not supported.
 Click a nickname in chat to view that person's bio and account handle.
 
-**Allow media previews** is a private account preference, saved in SQLite across
-sign-ins and devices. It defaults to off and will cover image, video, and YouTube
-embed previews. The preference is scaffolding: previews are not implemented and
-no media or embeds are fetched. Future preview rendering must check this preference
-before requesting or embedding media. Public profile APIs and broadcasts exclude it.
+**Media previews** is a private account preference, saved in SQLite across
+sign-ins and devices. Choose **Use server setting**, **Always allow**, or **Never
+allow**. Explicit choices override the owner's server default in either direction:
+a user may enable previews even when the server default is disabled. New accounts
+inherit the server default (initially off); existing allow/deny choices are preserved.
+Public profile APIs and broadcasts exclude this preference. Your other connected
+clients refresh it when your profile is saved.
+
+Supported previews: direct PNG/JPEG/GIF/WebP/AVIF image links, MP4/WebM/OGG video
+links, and YouTube watch/share/shorts/live/embed links. Message URLs remain clickable
+when previews are disabled. Up to three unique previews appear per message; deleted
+messages and the inline editor do not load previews. Videos do not autoplay, direct
+video downloads wait for playback, and images/YouTube frames load lazily. YouTube
+uses its [privacy-enhanced embed player](https://support.google.com/youtube/answer/171780).
+Previews load directly from the linked site in the viewer's browser; the server
+never downloads media or performs URL metadata lookups. HTTPS clients omit insecure
+HTTP previews. Unsupported or unavailable media can still be opened using its link.
+Upload hosting, generic website cards, and other provider embeds are not implemented.
+Changing a preference or the server default updates displayed previews immediately.
+Existing media players are preserved when unrelated messages arrive.
 
 Names can contain spaces and visible Unicode characters and need not be unique.
 The unique account username remains your sign-in handle. Click a nickname in chat
@@ -123,14 +138,16 @@ The backend checks owner access for every console operation; ordinary members
 cannot read private console data or change settings by calling its APIs directly.
 
 - **Settings:** server name, description, pause/resume invite-based registration,
-  connection limits, concurrent API request limits, and message rate/burst limits.
+  the default for media previews, connection limits, concurrent API request limits,
+  and message rate/burst limits.
 - **Channels:** view text channels and create new ones. Names are automatically lowercased, with whitespace converted to dashes.
 - **Invites:** create, view, copy by selecting a code, and revoke unused invites.
 - **Appearance:** edit the server-wide theme directly within the console.
 - **Message history:** inspect retained edits and deleted text by message ID.
 
 Settings persist in SQLite. Server identity and registration controls apply
-immediately, with identity updates sent to connected clients. Operational limits
+immediately, including the media-preview default for users who inherit it.
+Updates are sent to connected clients. Operational limits
 apply when the server next starts; the console shows saved and currently active
 values and a restart notice when they differ. Saving does not restart the process
 or disconnect users. Existing users can still sign in when registration is paused.
@@ -265,3 +282,5 @@ The implementation follows the official [FastAPI WebSocket documentation](https:
 and [pywebview usage guide](https://pywebview.flowrl.com/guide/usage.html).
 
 Message action icons are bundled locally from [Iconoir v7.12.1](https://github.com/iconoir-icons/iconoir/tree/v7.12.1), with its MIT license in `lanmsg/static/icons/LICENSE.iconoir`. Icons work without an internet connection and inherit the server theme.
+
+Preview UI checks: `node tests/media.cjs`. The Python suite checks persistence, migration, owner permissions, and private user overrides.

@@ -10,6 +10,7 @@ class AppSettings(BaseModel):
     server_name: str = Field(default="LANmsg", min_length=1, max_length=64)
     server_description: str = Field(default="Your private network", max_length=160)
     registration_enabled: bool = True
+    media_previews: bool = False
     connections: int = Field(default=100, ge=1, le=1000)
     connections_per_ip: int = Field(default=20, ge=1, le=1000)
     connections_per_session: int = Field(default=3, ge=1, le=10)
@@ -26,7 +27,7 @@ class AppSettings(BaseModel):
         return value
 
     def public(self):
-        return self.model_dump(include={"server_name", "server_description", "registration_enabled"})
+        return self.model_dump(include={"server_name", "server_description", "registration_enabled", "media_previews"})
 
 
 LIMIT_FIELDS = ("connections", "connections_per_ip", "connections_per_session", "http_concurrency", "message_rate", "message_burst")

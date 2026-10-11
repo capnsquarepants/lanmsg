@@ -3,6 +3,8 @@ const $ = id => document.getElementById(id);
 let member, channel = 1, channelList = [], registering = false, socket, heartbeat, reconnectTimer;
 let generation = 0, messages = new Map(), pendingSend, loading = false;
 const unread = new Set();
+const messageRows = new Map(), dayRows = new Map();
+let serverMediaPreviews = false;
 let editingMessage = null, editDraft = '', editVersion = 0, savingMessage = false;
 let savingAdmin = false, activeAdminSection = 'settings';
 const LIMIT_LABELS = {connections:'Total connections', connections_per_ip:'Connections per IP', connections_per_session:'Connections per session', http_concurrency:'Concurrent API requests', message_rate:'Messages per second / account', message_burst:'Message burst / account'};
@@ -11,6 +13,8 @@ function receiveServerSettings(settings) {
   $('server-description').textContent = settings.server_description;
   document.title = settings.server_name + ' · LANmsg';
   $('toggle-auth').hidden = !settings.registration_enabled;
+  serverMediaPreviews = settings.media_previews === true;
+  updateMediaPreference(member?.media_previews ?? null);
   if(!settings.registration_enabled && registering) { registering = false; authMode(); }
 }
 async function loadServerSettings() { receiveServerSettings(await api('/status')); }
@@ -84,6 +88,11 @@ $('admin-settings-form').onsubmit = async event => {
 const profileUpdates = new Map();
 let savingName = false, viewedUserId = null, userRequest = 0;
 let mediaPreviewsEnabled = false;
+function updateMediaPreference(preference) {
+  const enabled = MediaPreviews.enabled(preference, serverMediaPreviews);
+  if(member) member.media_previews = preference;
+  if(enabled !== mediaPreviewsEnabled) { mediaPreviewsEnabled = enabled; if(member) render(); }
+}
 function nicknameColor(profile) {
   return profile.nickname_color === 'accent' ? 'var(--accent)' : profile.nickname_color === 'text' ? 'var(--text)' : '';
 }
@@ -122,9 +131,9 @@ $('user-dialog').onclose = () => { viewedUserId = null; };
 $('identity').onclick = async () => {
   try {
     const profile = await api('/me/profile'); member = {...member, ...profile}; refreshIdentity();
-    mediaPreviewsEnabled = profile.media_previews;
+    updateMediaPreference(profile.media_previews);
     $('profile-bio').value = profile.bio; $('profile-color').value = profile.nickname_color;
-    $('profile-media-previews').checked = profile.media_previews;
+    $('profile-media-previews').value = profile.media_previews === null ? 'default' : profile.media_previews ? 'allow' : 'deny';
     $('display-name').value = member.display_name;
     $('display-name-handle').textContent = '@' + member.username;
     $('display-name-error').textContent = ''; $('display-name-dialog').showModal();
@@ -138,8 +147,8 @@ $('display-name-form').onsubmit = async event => {
   event.preventDefault(); if(savingName) return;
   savingName = true; $('display-name-save').disabled = true; $('display-name-error').textContent = '';
   try {
-    const profile = await api('/me/profile', {method:'PUT', body:JSON.stringify({display_name:$('display-name').value, bio:$('profile-bio').value, nickname_color:$('profile-color').value, media_previews:$('profile-media-previews').checked})});
-    mediaPreviewsEnabled = profile.media_previews; member.media_previews = profile.media_previews;
+    const profile = await api('/me/profile', {method:'PUT', body:JSON.stringify({display_name:$('display-name').value, bio:$('profile-bio').value, nickname_color:$('profile-color').value, media_previews:$('profile-media-previews').value === 'default' ? null : $('profile-media-previews').value === 'allow'})});
+    updateMediaPreference(profile.media_previews); member.media_previews = profile.media_previews;
     const {media_previews, ...publicProfile} = profile; receiveProfile(publicProfile); $('display-name-dialog').close();
   } catch(error) { $('display-name-error').textContent = error.message; }
   finally { savingName = false; $('display-name-save').disabled = false; }
@@ -322,21 +331,26 @@ function render() {
   for (const m of [...messages.values()].sort((a,b) => a.id-b.id)) {
     const timestamp = new Date(m.created*1000), day = timestamp.toDateString();
     if(day !== previousDay) {
-      const divider = document.createElement('div'); divider.className = 'day-divider';
+      const divider = dayRows.get(day) || document.createElement('div'); divider.className = 'day-divider'; dayRows.set(day, divider);
       divider.textContent = timestamp.toLocaleDateString(undefined,{weekday:'short',year:'numeric',month:'short',day:'numeric'});
       rows.push(divider); previousDay = day;
     }
-    const item = document.createElement('article'); item.className = 'message' + (m.user_id === member?.id ? ' self' : '');
     const profile = {...m, ...profileUpdates.get(m.user_id)}, displayName = profile.display_name || profile.username;
+    const signature = JSON.stringify([m.version, m.content, m.deleted, m.edited, profile.display_name, profile.username, profile.nickname_color, mediaPreviewsEnabled, member?.owner]);
+    const cached = messageRows.get(m.id);
+    if(editingMessage !== m.id && cached?.signature === signature) { rows.push(cached.item); continue; }
+    const item = document.createElement('article'); item.className = 'message' + (m.user_id === member?.id ? ' self' : '');
     const name = document.createElement('button'); name.type = 'button'; name.className = 'nickname'; name.textContent = '<' + displayName + '>'; name.title = displayName + ' (@' + profile.username + ')';
     name.style.color = nicknameColor(profile);
     name.setAttribute('aria-label', 'View ' + displayName + ', @' + profile.username); name.onclick = () => openUser(m.user_id);
     const date = document.createElement('time'); date.dateTime = timestamp.toISOString(); date.textContent = timestamp.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',hour12:false}); date.title = timestamp.toLocaleString();
-    const body = document.createElement('div'); body.className = 'body'; body.textContent = m.deleted ? 'Message deleted' : m.content;
+    const body = document.createElement('div'); body.className = 'body';
+    if(m.deleted) body.textContent = 'Message deleted'; else MediaPreviews.appendText(body, m.content);
     if(m.deleted) body.classList.add('deleted-message');
     if(m.edited && !m.deleted) {
       const marker = document.createElement('small'); marker.className = 'edited-marker'; marker.textContent = ' (edited)'; marker.title = new Date(m.edited*1000).toLocaleString(); body.append(marker);
     }
+    if(!m.deleted && editingMessage !== m.id) MediaPreviews.appendPreviews(body, m.content, mediaPreviewsEnabled);
     const actions = document.createElement('div'); actions.className = 'message-actions';
     actions.setAttribute('role', 'group'); actions.setAttribute('aria-label', 'Message actions');
     if(!m.deleted && m.user_id === member?.id) actions.append(messageIcon('Edit message', 'edit-pencil', () => {
@@ -360,8 +374,13 @@ function render() {
       item.append(actions);
     }
     rows.push(item);
+    if(editingMessage !== m.id) messageRows.set(m.id, {signature,item});
   }
-  $('message-list').replaceChildren(...rows);
+  const list = $('message-list'), desired = new Set(rows);
+  for(const child of [...list.children]) if(!desired.has(child)) child.remove();
+  rows.forEach((row,index) => { if(list.children[index] !== row) list.insertBefore(row,list.children[index] || null); });
+  for(const [id,cached] of messageRows) if(!messages.has(id)) messageRows.delete(id);
+  for(const [day,row] of dayRows) if(!desired.has(row)) dayRows.delete(day);
   $('empty').hidden = messages.size > 0;
   if(editFocus) { const input = $('message-edit-' + editingMessage); if(input && !input.disabled) { input.focus({preventScroll:true}); input.setSelectionRange(editFocus.start,editFocus.end); } }
   if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
@@ -395,14 +414,17 @@ function connect() {
     heartbeat = setInterval(() => { if(socket.readyState === WebSocket.OPEN) socket.send('ping'); },20000);
     try {
       profileUpdates.clear(); member = {...await api('/me'), ...await api('/me/profile')};
-      mediaPreviewsEnabled = member.media_previews;
+      updateMediaPreference(member.media_previews);
       if(profileUpdates.has(member.id)) member = {...member, ...profileUpdates.get(member.id)};
       refreshIdentity(); await loadServerSettings(); await loadAppearance(); await select(channel);
     } catch(error) { showError(error); }
   };
   socket.onmessage = event => {
     const data = JSON.parse(event.data);
-    if(data.type === 'profile') receiveProfile(data.profile);
+    if(data.type === 'profile') {
+      receiveProfile(data.profile);
+      if(data.profile.id === member?.id) api('/me/profile').then(profile => updateMediaPreference(profile.media_previews)).catch(showError);
+    }
     if(data.type === 'server_settings') receiveServerSettings(data.settings);
     if(data.type === 'appearance') receiveTheme(data.appearance);
     if(data.type === 'channels') loadChannels().catch(showError);
@@ -418,7 +440,7 @@ function connect() {
   socket.onclose = () => { clearInterval(heartbeat); $('connection').textContent = 'Reconnecting…'; $('connection').dataset.state = 'offline'; reconnectTimer = setTimeout(connect,2000); };
 }
 async function start() {
-  const profile = await api('/me/profile'); member = {...member, ...profile}; mediaPreviewsEnabled = profile.media_previews;
+  const profile = await api('/me/profile'); member = {...member, ...profile}; updateMediaPreference(profile.media_previews);
   $('auth').hidden = true; $('chat').hidden = false; $('admin').hidden = !member.owner;
   refreshIdentity();
   await loadChannels();
